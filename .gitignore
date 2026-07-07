@@ -1,0 +1,40 @@
+# === 凭证 / 私密目录（绝不入库）===
+.env
+private/
+*-unpacked/
+
+# === 数据库 / 运行时产物 ===
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# === 凭证 / 状态文件 ===
+memory/config.json
+*-state.json
+
+# === 采集产物 ===
+output/
+screenshots/
+.playwright-cli/
+
+# === Playwright 持久化 profile ===
+*-profile/
+
+# === Chrome / OS 垃圾 ===
+.DS_Store
+Thumbs.db
+
+# === Node ===
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# === 日志 ===
+logs/
+*.log
+
+# === 临时探索脚本（不进版本控制）===
+tmp/
+*.tmp.mjs

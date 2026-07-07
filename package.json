@@ -1,0 +1,22 @@
+{
+  "name": "daima-reverse-engineering",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "⚔️ ULTIMATE REVERSE ENGINEERING — 代码逆向与重建大师工作台",
+  "scripts": {
+    "memory:init": "node memory/scripts/memory-init.mjs",
+    "memory:store": "node memory/scripts/memory-store.mjs",
+    "memory:search": "node memory/scripts/memory-search.mjs",
+    "memory:summary": "node memory/scripts/memory-summary.mjs",
+    "workbench:new": "node tools/create-workbench.mjs",
+    "analyze:file": "node tools/file-analyzer.mjs",
+    "huice:sync": "node scripts/huice-sync.mjs",
+    "huice:backfill": "node scripts/huice-sync.mjs --days 30"
+  },
+  "dependencies": {
+    "@lancedb/lancedb": "^0.30.0",
+    "better-sqlite3": "^12.11.1",
+    "playwright": "^1.61.0"
+  }
+}

@@ -1,0 +1,91 @@
+{
+  "update_url": "https://clients2.google.com/service/update2/crx",
+  "name": "店透视",
+  "version": "5.0.16",
+  "manifest_version": 3,
+  "description": "专为电商卖家设计，集多平台行业、商品、店铺和详情数据的高效分析与导出等功能于一体。",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "19": "icons/icon-19.png",
+    "38": "icons/icon-38.png",
+    "64": "icons/icon-64.png",
+    "128": "icons/icon-128.png"
+  },
+  "short_name": "店透视",
+  "homepage_url": "https://diantoushi.com",
+  "background": {
+    "service_worker": "script/service_worker.js"
+  },
+  "permissions": [
+    "activeTab",
+    "alarms",
+    "background",
+    "cookies",
+    "declarativeContent",
+    "declarativeNetRequest",
+    "declarativeNetRequestFeedback",
+    "declarativeNetRequestWithHostAccess",
+    "downloads",
+    "notifications",
+    "offscreen",
+    "scripting",
+    "sessions",
+    "storage",
+    "tabs",
+    "userScripts",
+    "unlimitedStorage",
+    "webNavigation",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "externally_connectable": {
+    "ids": [
+      "*"
+    ],
+    "matches": [
+      "*://*/*"
+    ],
+    "accepts_tls_channel_id": false
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "script/content_scripts.js"
+      ],
+      "run_at": "document_start",
+      "type": "module",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_title": "店透视",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "19": "icons/icon-19.png",
+      "38": "icons/icon-38.png",
+      "64": "icons/icon-64.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "resources": [
+        "source/*",
+        "script/*",
+        "remotes/*"
+      ]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self';"
+  }
+}
