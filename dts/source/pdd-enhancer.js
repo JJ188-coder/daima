@@ -805,17 +805,36 @@ async function getPromoDataByWindow(window) {
     return v?.records || [];
   }
 
-  /** 读日期范围内所有天的 huice 数据,按 productId 聚合(多天数值相加) */
+  /** 读日期范围内所有天的 huice 数据,按 productId 聚合(多天数值相加)
+   *  双通道: 优先 HTTP 服务(127.0.0.1:9911),失败 fallback 回 storage
+   */
   async function getHuiceDataByDateRange(startDate, endDate) {
     if (!startDate) return [];
+    const end = endDate || startDate;
+
+    // === 通道 1: 本地 HTTP 服务(日常 Chrome 也能用) ===
+    try {
+      const resp = await fetch(`http://127.0.0.1:9911/huice?start=${startDate}&end=${end}`, { signal: AbortSignal.timeout(3000) });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.records && Array.isArray(data.records) && data.records.length > 0) {
+          console.log(HUICE_NS, `✅ HTTP 通道命中: ${data.count} 条 (${startDate} ~ ${end})`);
+          return data.records;
+        }
+      }
+    } catch (e) {
+      // HTTP 服务不在线,静默 fallback
+    }
+
+    // === 通道 2: 扩展 storage(CDP Chrome 原有方式) ===
     const start = new Date(startDate);
-    const end = new Date(endDate || startDate);
-    if (isNaN(start) || isNaN(end)) return [];
+    const endD = new Date(end);
+    if (isNaN(start) || isNaN(endD)) return [];
 
     // 收集范围内所有日期 key
     const keys = [];
     const cur = new Date(start);
-    while (cur <= end) {
+    while (cur <= endD) {
       const y = cur.getFullYear();
       const m = String(cur.getMonth() + 1).padStart(2, '0');
       const d = String(cur.getDate()).padStart(2, '0');
@@ -852,6 +871,7 @@ async function getPromoDataByWindow(window) {
         }
       }
     }
+    console.log(HUICE_NS, `📦 storage 通道: ${Object.keys(byProduct).length} 条 (${startDate} ~ ${end})`);
     return Object.values(byProduct);
   }
 
