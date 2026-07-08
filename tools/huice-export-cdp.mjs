@@ -26,8 +26,10 @@ const DOWNLOAD_DIR = path.resolve(process.env.HOME, 'Downloads');
 
 const args = process.argv.slice(2);
 let days = 1;
+let customDates = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--days' && args[i+1]) { days = parseInt(args[i+1]); i++; }
+  if (args[i] === '--dates' && args[i+1]) { customDates = args[i+1].split(','); i++; }
 }
 
 function dateStr(offset = 0) {
@@ -257,8 +259,13 @@ print(json.dumps(records))
 async function main() {
   if (!existsSync(OUTPUT_DIR)) mkdirSync(OUTPUT_DIR, { recursive: true });
 
-  console.log(`🚀 慧经营导出回采（${days} 天）`);
-  console.log(`   日期范围: ${dateStr(-1)} ~ ${dateStr(-days)}`);
+  // 日期列表:--dates 优先,否则按 --days 生成
+  const dateList = customDates.length > 0
+    ? customDates.sort()
+    : Array.from({ length: days }, (_, i) => dateStr(-(i + 1)));
+
+  console.log(`🚀 慧经营导出回采（${dateList.length} 天）`);
+  console.log(`   日期范围: ${dateList[0]} ~ ${dateList[dateList.length - 1]}`);
 
   // 找 hjy 标签页
   const tabs = await (await fetch('http://127.0.0.1:9222/json/list')).json();
@@ -277,21 +284,38 @@ async function main() {
   }
 
   const allRecords = [];
+  const failedDates = [];
 
-  for (let offset = 1; offset <= days; offset++) {
-    const targetDate = dateStr(-offset);
-    console.log(`\n📅 [${offset}/${days}] 采集 ${targetDate}...`);
+  for (let i = 0; i < dateList.length; i++) {
+    const targetDate = dateList[i];
+    console.log(`\n📅 [${i + 1}/${dateList.length}] 采集 ${targetDate}...`);
 
     // 0. 每天先刷新页面,清除日期选择器的残留 Vue 状态
-    if (offset > 1) {
+    if (i > 0) {
       await cdpEval(ws, 'location.reload()');
       await sleep(5000);
     }
 
-    // 1. 切日期（面板点击方式）
-    const dateResult = await setDateRangeByPanel(ws, targetDate);
-    if (dateResult.start !== targetDate || dateResult.end !== targetDate) {
-      console.log(`  ⚠ 日期切换失败: ${JSON.stringify(dateResult)},跳过`);
+    // 1. 切日期（面板点击方式,失败自动重试 3 次）
+    let dateResult = null;
+    let dateOk = false;
+    for (let retry = 0; retry < 3; retry++) {
+      if (retry > 0) {
+        console.log(`  🔄 日期切换重试 ${retry + 1}/3 (重载页面清 Vue 状态)`);
+        await cdpEval(ws, 'location.href = "https://hjy.huice.com/#/opertData/CommodityAnalysis"');
+        await sleep(5000);
+      }
+      dateResult = await setDateRangeByPanel(ws, targetDate);
+      if (dateResult.start === targetDate && dateResult.end === targetDate) {
+        dateOk = true;
+        break;
+      }
+      console.log(`  ⚠ 日期切换失败(尝试 ${retry + 1}): ${JSON.stringify(dateResult)}`);
+    }
+    if (!dateOk) {
+      console.log(`  ❌ 日期切换 3 次均失败,跳过 ${targetDate}`);
+      // 记录失败日期,供后续补采
+      failedDates.push(targetDate);
       continue;
     }
 
@@ -401,6 +425,15 @@ async function main() {
   writeFileSync(summaryFile, JSON.stringify(allRecords, null, 2));
   console.log(`💾 数据落盘: ${summaryFile} (${allRecords.length} 条)`);
   console.log(`✅ 回采完成`);
+
+  // 失败日期汇总
+  if (failedDates.length > 0) {
+    const failLog = path.join(OUTPUT_DIR, 'failed-dates.json');
+    writeFileSync(failLog, JSON.stringify({ dates: failedDates, ts: new Date().toISOString() }, null, 2));
+    console.log(`⚠️ ${failedDates.length} 天采集失败,已记录到 ${failLog}`);
+    console.log(`   失败日期: ${failedDates.join(', ')}`);
+    console.log(`   补采命令: node tools/huice-export-cdp.mjs --dates ${failedDates.join(',')}`);
+  }
 }
 
 main().catch(e => { console.error('❌', e.message); process.exit(1); });

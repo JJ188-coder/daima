@@ -1,7 +1,7 @@
 {
   "update_url": "https://clients2.google.com/service/update2/crx",
   "name": "店透视",
-  "version": "5.0.16",
+  "version": "5.0.17",
   "manifest_version": 3,
   "description": "专为电商卖家设计，集多平台行业、商品、店铺和详情数据的高效分析与导出等功能于一体。",
   "icons": {

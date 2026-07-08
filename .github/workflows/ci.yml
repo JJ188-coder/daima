@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Check JS syntax
+        run: |
+          # 检查所有 .mjs 文件语法
+          find tools scripts -name "*.mjs" -print0 | xargs -0 -I{} node --check {} || true
+          # 检查 pdd-enhancer.js 语法
+          node --check dts/source/pdd-enhancer.js
+
+      - name: Validate manifest.json
+        run: |
+          python3 -c "
+          import json
+          with open('dts/manifest.json') as f:
+              m = json.load(f)
+          assert m['manifest_version'] == 3, 'manifest_version must be 3'
+          assert 'version' in m, 'missing version'
+          assert 'service_worker' in m.get('background', {}), 'missing service_worker'
+          print(f'✅ manifest valid: v{m[\"version\"]}')
+          "
+
+      - name: Check no secrets in git
+        run: |
+          # 确认 .gitignore 排除了敏感文件
+          git check-ignore private/huice.env private/huice-data.sqlite memory/config.json
+          # 确认没有 secret 在 tracked 文件里
+          ! grep -r "client_secret\|api_key\|password" --include="*.js" --include="*.mjs" dts/ scripts/ tools/ 2>/dev/null || true

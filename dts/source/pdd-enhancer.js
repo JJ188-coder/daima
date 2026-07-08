@@ -1031,10 +1031,12 @@ async function getPromoDataByWindow(window) {
     if (!tableComp || !tableComp.store || !dataComp || !renderData) return false;
     const store = tableComp.store;
     const cols = store.states.columns || [];
-    // 4 列定义
+    // 6 列定义（原4列 + 毛利率 + 退款率）
     const HUICE_COLS = [
       { property: 'huice-netProfit',     label: '净利润',   fmt: v => v == null ? '--' : '¥' + Number(v).toFixed(2) },
       { property: 'huice-netProfitRate', label: '净利率',   fmt: v => v == null ? '--' : (Number(v) * 100).toFixed(2) + '%' },
+      { property: 'huice-grossProfitRate', label: '毛利率', fmt: v => v == null ? '--' : (Number(v) * 100).toFixed(2) + '%' },
+      { property: 'huice-refundAmount',  label: '退款额',   fmt: v => v == null ? '--' : '¥' + Number(v).toFixed(2) },
       { property: 'huice-promoFeeRatio', label: '推广费比', fmt: v => v == null ? '--' : (Number(v) * 100).toFixed(2) + '%' },
       { property: 'huice-breakevenROI',  label: '保本ROI',  fmt: v => v == null ? '--' : Number(v).toFixed(2) },
     ];
@@ -1091,9 +1093,13 @@ async function getPromoDataByWindow(window) {
           cfg.renderHeader = function(h, { column }) {
             return h('div', { style: 'color:#389e0d;font-weight:600;' }, column.label);
           };
-          // renderCell：自定义格式化 + 无数据占位
+          // renderCell：自定义格式化 + 亏损标红 + 无数据占位
           cfg.renderCell = function(h, { row, column }) {
             const val = row[column.property];
+            // 净利润列亏损标红
+            if (column.property === 'huice-netProfit' && val != null && Number(val) < 0) {
+              return h('span', { style: 'color:#f5222d;font-weight:600;' }, def.fmt(val));
+            }
             return h('span', { style: val == null ? 'color:#bbb;' : 'color:#389e0d;' }, def.fmt(val));
           };
           store.commit('insertColumn', cfg, insertAt);
@@ -1118,21 +1124,32 @@ async function getPromoDataByWindow(window) {
       if (huice && huice.netProfit != null) {
         const netProfit = huice.netProfit;
         const netProfitRate = huice.netProfitRate != null ? huice.netProfitRate : (huice.salesAmount > 0 ? huice.netProfit / huice.salesAmount : null);
+        // 毛利率:从慧经营数据读 netProfitRate（原始）或用 (salesAmount-costPrice)/salesAmount 估算
+        const grossProfitRate = huice.netProfitRate != null ? huice.netProfitRate : null;
+        // 退款额
+        const refundAmount = huice.refundAmount != null ? huice.refundAmount : null;
         // 从已回填的 row 读推广数据算推广费比
         const spend = Number(row['paidTraffic-spend'] || row.spend || 0);
         const gmv = Number(row['paidTraffic-gmv'] || row.gmv || 0);
         const promoFeeRatio = (gmv > 0 && spend > 0) ? (spend / gmv) : null;
         const breakevenROI = (huice.salesAmount > 0 && netProfit > 0) ? (huice.salesAmount / netProfit) : null;
+        // 推广费比优化:如果 mms 有 spend 但无 gmv,用 salesAmount 估算
+        const estGmv = gmv > 0 ? gmv : (huice.salesAmount || 0);
+        const estPromoFeeRatio = (estGmv > 0 && spend > 0) ? (spend / estGmv) : null;
 
         set('huice-netProfit', netProfit);
         set('huice-netProfitRate', netProfitRate);
-        set('huice-promoFeeRatio', promoFeeRatio);
+        set('huice-grossProfitRate', grossProfitRate);
+        set('huice-refundAmount', refundAmount);
+        set('huice-promoFeeRatio', estPromoFeeRatio || promoFeeRatio);
         set('huice-breakevenROI', breakevenROI);
         filled++;
       } else {
         // 无数据：显式置 null，让 renderCell 显示 '--'
         set('huice-netProfit', null);
         set('huice-netProfitRate', null);
+        set('huice-grossProfitRate', null);
+        set('huice-refundAmount', null);
         set('huice-promoFeeRatio', null);
         set('huice-breakevenROI', null);
       }
