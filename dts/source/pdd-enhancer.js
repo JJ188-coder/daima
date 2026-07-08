@@ -777,11 +777,88 @@ async function getPromoDataByWindow(window) {
   // ============ 慧经营利润数据：存储 & 读取 ============
   const HUICE_NS = '🏪[huice]';
 
+  function huiceNum(v) {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(String(v).replace(/,/g, '').replace(/%/g, '').trim());
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function huiceRatio(numerator, denominator) {
+    const n = huiceNum(numerator);
+    const d = huiceNum(denominator);
+    return n != null && d != null && d > 0 ? n / d : null;
+  }
+
+  function normalizeHuiceRecord(record) {
+    const salesAmount = huiceNum(record.salesAmount);
+    const salesQuantity = huiceNum(record.salesQuantity);
+    const orderCount = huiceNum(record.orderCount != null ? record.orderCount : record.salesQuantity);
+    const rawNetProfit = huiceNum(record.rawNetProfit != null ? record.rawNetProfit : (record.huiceNetProfit != null ? record.huiceNetProfit : record.netProfit));
+    const adjustedNetProfit = huiceNum(record.netProfit);
+    const orderFixedCost = record.orderFixedCost != null ? huiceNum(record.orderFixedCost) : (orderCount != null ? orderCount * 1.15 : null);
+    const platformFee = record.platformFee != null ? huiceNum(record.platformFee) : (salesAmount != null ? salesAmount * 0.02 : null);
+    const netProfit = adjustedNetProfit != null ? adjustedNetProfit : (rawNetProfit != null ? rawNetProfit - (orderFixedCost || 0) - (platformFee || 0) : null);
+    const grossProfit = huiceNum(record.grossProfit);
+    const refundAmount = huiceNum(record.refundAmount);
+    return {
+      ...record,
+      productId: String(record.productId || ''),
+      productName: record.productName || '',
+      shopName: record.shopName || '',
+      salesAmount,
+      salesQuantity,
+      orderCount,
+      costPrice: huiceNum(record.costPrice),
+      grossProfit,
+      grossProfitRate: huiceNum(record.grossProfitRate) != null ? huiceNum(record.grossProfitRate) : huiceRatio(grossProfit, salesAmount),
+      refundAmount,
+      refundRate: huiceNum(record.refundRate) != null ? huiceNum(record.refundRate) : huiceRatio(refundAmount, salesAmount),
+      rawNetProfit,
+      rawNetProfitRate: huiceNum(record.rawNetProfitRate) != null ? huiceNum(record.rawNetProfitRate) : huiceRatio(rawNetProfit, salesAmount),
+      netProfit,
+      netProfitRate: huiceNum(record.netProfitRate) != null ? huiceNum(record.netProfitRate) : huiceRatio(netProfit, salesAmount),
+      orderFixedCost,
+      platformFee,
+      platformFeeRate: record.platformFeeRate != null ? huiceNum(record.platformFeeRate) : 0.02,
+      orderFixedUnitCost: record.orderFixedUnitCost != null ? huiceNum(record.orderFixedUnitCost) : 1.15,
+      profitFormulaVersion: record.profitFormulaVersion || 'order-fixed-v1',
+    };
+  }
+
+  function aggregateHuiceRecords(records) {
+    const byProduct = {};
+    for (const input of records || []) {
+      const r = normalizeHuiceRecord(input);
+      if (!r.productId) continue;
+      if (!byProduct[r.productId]) {
+        byProduct[r.productId] = { ...r };
+      } else {
+        const existing = byProduct[r.productId];
+        if (!existing.productName && r.productName) existing.productName = r.productName;
+        if (!existing.shopName && r.shopName) existing.shopName = r.shopName;
+        for (const field of ['salesAmount', 'salesQuantity', 'orderCount', 'costPrice', 'grossProfit', 'refundAmount', 'rawNetProfit', 'netProfit', 'orderFixedCost', 'platformFee']) {
+          const a = huiceNum(existing[field]);
+          const b = huiceNum(r[field]);
+          existing[field] = (a != null || b != null) ? (a || 0) + (b || 0) : null;
+        }
+        if (!existing.date || r.date > existing.date) existing.date = r.date;
+      }
+    }
+    for (const r of Object.values(byProduct)) {
+      r.netProfitRate = huiceRatio(r.netProfit, r.salesAmount);
+      r.rawNetProfitRate = huiceRatio(r.rawNetProfit, r.salesAmount);
+      r.grossProfitRate = huiceRatio(r.grossProfit, r.salesAmount);
+      r.refundRate = huiceRatio(r.refundAmount, r.salesAmount);
+    }
+    return Object.values(byProduct);
+  }
+
   async function saveHuiceData(records) {
     if (!records?.length) return;
-    const date = records[0].date || new Date().toISOString().slice(0, 10);
+    const normalized = records.map(normalizeHuiceRecord);
+    const date = normalized[0].date || new Date().toISOString().slice(0, 10);
     const windowKey = 'pdd_huice_window_' + date;
-    const payload = { records, capturedAt: Date.now(), date };
+    const payload = { records: normalized, capturedAt: Date.now(), date };
     await swCall('SetLocalData', { [windowKey]: payload });
     // 维护索引
     try {
@@ -794,7 +871,7 @@ async function getPromoDataByWindow(window) {
         await swCall('SetLocalData', { pdd_huice_windows: newList });
       }
     } catch(e) {}
-    console.log(HUICE_NS, '✓ Saved ' + records.length + ' records for ' + date);
+    console.log(HUICE_NS, '✓ Saved ' + normalized.length + ' records for ' + date);
   }
 
   async function getHuiceDataByDate(date) {
@@ -846,33 +923,17 @@ async function getPromoDataByWindow(window) {
     const d = await swCall('GetLocalData', { key: keys });
     if (!d) return [];
 
-    // 按 productId 聚合:多天数据数值相加
-    const byProduct = {};
+    const allRecords = [];
     for (const k of keys) {
       const v = d[k];
       if (!v) continue;
       const records = v.records || v;
       if (!Array.isArray(records)) continue;
-      for (const r of records) {
-        if (!r.productId) continue;
-        if (!byProduct[r.productId]) {
-          byProduct[r.productId] = { ...r };
-        } else {
-          // 数值字段相加
-          const existing = byProduct[r.productId];
-          for (const field of ['salesAmount', 'salesQuantity', 'costPrice', 'refundAmount', 'netProfit']) {
-            const a = Number(existing[field]) || 0;
-            const b = Number(r[field]) || 0;
-            existing[field] = (a || b) ? a + b : null;
-          }
-          // 净利率:用最后一天有值的(或按销售额加权)
-          if (r.netProfitRate != null) existing.netProfitRate = r.netProfitRate;
-          if (r.refundRate != null) existing.refundRate = r.refundRate;
-        }
-      }
+      allRecords.push(...records);
     }
-    console.log(HUICE_NS, `📦 storage 通道: ${Object.keys(byProduct).length} 条 (${startDate} ~ ${end})`);
-    return Object.values(byProduct);
+    const aggregated = aggregateHuiceRecords(allRecords);
+    console.log(HUICE_NS, `📦 storage 通道: ${aggregated.length} 条 (${startDate} ~ ${end})`);
+    return aggregated;
   }
 
   /** 慧经营页面：从表格提取商品级数据
@@ -922,11 +983,14 @@ async function getPromoDataByWindow(window) {
           shopName,
           salesAmount: parseNum(byColId.receivableAmount),
           salesQuantity: parseNum(byColId.payQty),
+          orderCount: parseNum(byColId.payQty),
           costPrice: parseNum(byColId.costAmount),
+          grossProfit: parseNum(byColId.grossProfit),
+          grossProfitRate: parsePct(byColId.grossProfitRateString),
           refundAmount: parseNum(byColId.refundAmount),
           refundRate: parsePct(byColId.refundRateString),
-          netProfit: parseNum(byColId.netProfit),
-          netProfitRate: parsePct(byColId.netInterestString),
+          rawNetProfit: parseNum(byColId.netProfit),
+          rawNetProfitRate: parsePct(byColId.netInterestString),
           date: useDate,
           source: 'huice'
         });
@@ -974,10 +1038,11 @@ async function getPromoDataByWindow(window) {
           shopName: shopIdx >= 0 ? cells[shopIdx] : '',
           salesAmount: parseNum(cells[salesAmtIdx]),
           salesQuantity: salesQtyIdx >= 0 ? parseInt(String(cells[salesQtyIdx]).replace(/,/g, '')) || 0 : 0,
+          orderCount: salesQtyIdx >= 0 ? parseInt(String(cells[salesQtyIdx]).replace(/,/g, '')) || 0 : 0,
           refundAmount: parseNum(cells[refundAmtIdx]),
           refundRate: parsePct(cells[refundRateIdx]),
-          netProfit: parseNum(cells[netProfitIdx]),
-          netProfitRate: parsePct(cells[netProfitRateIdx]),
+          rawNetProfit: parseNum(cells[netProfitIdx]),
+          rawNetProfitRate: parsePct(cells[netProfitRateIdx]),
           costPrice: parseNum(cells[costIdx]),
           date: useDate,
           source: 'huice'
@@ -1144,8 +1209,7 @@ async function getPromoDataByWindow(window) {
       if (huice && huice.netProfit != null) {
         const netProfit = huice.netProfit;
         const netProfitRate = huice.netProfitRate != null ? huice.netProfitRate : (huice.salesAmount > 0 ? huice.netProfit / huice.salesAmount : null);
-        // 毛利率:从慧经营数据读 netProfitRate（原始）或用 (salesAmount-costPrice)/salesAmount 估算
-        const grossProfitRate = huice.netProfitRate != null ? huice.netProfitRate : null;
+        const grossProfitRate = huice.grossProfitRate != null ? huice.grossProfitRate : null;
         // 退款额
         const refundAmount = huice.refundAmount != null ? huice.refundAmount : null;
         // 从已回填的 row 读推广数据算推广费比

@@ -16,11 +16,11 @@
 | 列名 | 举个例子 | 说明 |
 |---|---|---|
 | 净利润 | ¥123.45 | 扣了包装人工(1.15元/单) + 平台费(2%)之后真正赚到的钱 |
-| 净利率 | 33.43% | 净利润 ÷ 销售额 |
-| 毛利率 | 45.20% | 慧经营原始毛利率 |
+| 净利率 | 20.00% | 净利润 ÷ 销售额 |
+| 毛利率 | 35.00% | 慧经营原始毛利率 |
 | 退款额 | ¥56.78 | 当期退款总金额 |
-| 推广费比 | 13.07% | 推广花了多少钱占 GMV 多少 |
-| 保本ROI | 4.73 | 销售额 ÷ 净利润，低于这个 ROI 就亏 |
+| 推广费比 | 10.00% | 推广花了多少钱占 GMV 多少 |
+| 保本ROI | 5.00 | 销售额 ÷ 净利润，低于这个 ROI 就亏 |
 
 3. **亏损商品自动标红**，一眼就能看出来哪些在亏钱
 
@@ -117,8 +117,8 @@ node tools/write-storage.mjs --days 1        # 写进扩展
 
 | 你想干嘛 | 跑什么命令 |
 |---|---|
-| 采集 30 天历史数据 | `node tools/huice-export-cdp.mjs --days 30` |
-| 补采某几天的数据 | `node tools/huice-export-cdp.mjs --dates 2026-07-05,2026-07-06` |
+| 采集最近 N 天历史数据 | `node tools/huice-export-cdp.mjs --days 7` |
+| 补采某几天的数据 | `node tools/huice-export-cdp.mjs --dates YYYY-MM-DD,YYYY-MM-DD` |
 | 把数据写进扩展 | `node tools/write-storage.mjs --days 7` |
 | 看运营看板 | `node tools/huice-report.mjs --days 7` |
 | 手动启动 Chrome | `bash scripts/start-cdp-chrome.sh`（Mac）/ `powershell -File scripts\start-cdp-chrome.ps1`（Windows） |
@@ -193,7 +193,7 @@ type %TEMP%\huice-daily.log      # Windows
 
 补采失败的日期：
 ```bash
-node tools/huice-export-cdp.mjs --dates 2026-07-05
+node tools/huice-export-cdp.mjs --dates YYYY-MM-DD
 ```
 
 ### Q: 凭证填错了想改
@@ -226,14 +226,16 @@ schtasks /Delete /TN "Daima_Huice_Daily" /F
 ## 净利润怎么算的
 
 ```
-净利润 = 慧经营毛利额 - 包装人工成本 - 平台费
-       = 慧经营毛利额 - (1.15元 × 销量) - (销售额 × 2%)
+调整后净利润 = 慧经营原始净利额 - 订单固定成本 - 平台费
+             = 慧经营原始净利额 - (1.15元 × 销售件数) - (销售额 × 2%)
 ```
 
-- **包装人工成本**：每单 1.15 元（可以改）
-- **平台费**：销售额的 2%（可以改）
+- **慧经营原始净利额**：单独保存，方便以后追溯。
+- **调整后净利润**：页面里展示的净利润。
+- **订单固定成本**：每单 1.15 元；当前口径里销售件数就是订单数。
+- **平台费**：销售额的 2%。
 
-如果想改这两个参数，编辑 `tools/huice-export-cdp.mjs` 里的 `parseXlsx` 函数。
+多日数据合并时，净利率会用“合计调整后净利润 ÷ 合计销售额”重新计算。
 
 ---
 

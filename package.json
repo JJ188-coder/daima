@@ -1,16 +1,12 @@
 {
-  "name": "daima-reverse-engineering",
+  "name": "daima-huice-pdd-profit",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "⚔️ ULTIMATE REVERSE ENGINEERING — 代码逆向与重建大师工作台",
+  "description": "慧经营利润数据采集与拼多多商品报表增强工具",
   "scripts": {
-    "memory:init": "node memory/scripts/memory-init.mjs",
-    "memory:store": "node memory/scripts/memory-store.mjs",
-    "memory:search": "node memory/scripts/memory-search.mjs",
-    "memory:summary": "node memory/scripts/memory-summary.mjs",
-    "workbench:new": "node tools/create-workbench.mjs",
-    "analyze:file": "node tools/file-analyzer.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check:js": "find tools scripts test -name \"*.mjs\" -print0 | xargs -0 -I{} node --check {} && node --check dts/source/pdd-enhancer.js",
     "huice:sync": "node scripts/huice-sync.mjs",
     "huice:backfill": "node scripts/huice-sync.mjs --days 30"
   },

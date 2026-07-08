@@ -9,7 +9,7 @@
  *   4. 等下载完成,解析 xlsx -> 入库 SQLite
  *
  * 用法:
- *   node tools/huice-export-cdp.mjs --days 30   # 回采 30 天
+ *   node tools/huice-export-cdp.mjs --days 7    # 回采最近 7 天
  *   node tools/huice-export-cdp.mjs --days 1     # 采昨天
  */
 
@@ -226,12 +226,15 @@ for row in rows[11:]:
     raw_net_profit_rate = pp(row[16])
     sales_amt = pn(row[5])
     sales_qty = pn(row[7])
-    # 真实净利润 = 慧经营净利额 - 1.15×销量(件数,作为单数) - 销售额×2%
-    packing_cost = 1.15 * sales_qty if sales_qty is not None else 0
+    gross_profit = pn(row[10])
+    gross_profit_rate = pp(row[12])
+    # 真实净利润 = 慧经营净利额 - 1.15×销售件数(按订单数) - 销售额×2%
+    order_count = sales_qty
+    order_fixed_cost = 1.15 * order_count if order_count is not None else 0
     platform_fee = sales_amt * 0.02 if sales_amt is not None else 0
     real_net_profit = None
     if raw_net_profit is not None:
-        real_net_profit = raw_net_profit - packing_cost - platform_fee
+        real_net_profit = raw_net_profit - order_fixed_cost - platform_fee
     # 真实净利率 = 真实净利润 / 销售额
     real_net_profit_rate = None
     if real_net_profit is not None and sales_amt and sales_amt > 0:
@@ -242,11 +245,21 @@ for row in rows[11:]:
         'shopName': str(row[0] or '').strip(),
         'salesAmount': sales_amt,
         'salesQuantity': sales_qty,
+        'orderCount': order_count,
         'costPrice': pn(row[8]),
+        'grossProfit': gross_profit,
+        'grossProfitRate': gross_profit_rate,
         'refundAmount': pn(row[13]),
         'refundRate': pp(row[14]),
+        'rawNetProfit': raw_net_profit,
+        'rawNetProfitRate': raw_net_profit_rate,
         'netProfit': real_net_profit,
         'netProfitRate': real_net_profit_rate,
+        'orderFixedCost': order_fixed_cost,
+        'platformFee': platform_fee,
+        'platformFeeRate': 0.02,
+        'orderFixedUnitCost': 1.15,
+        'profitFormulaVersion': 'order-fixed-v1',
         'date': '${targetDate}',
         'source': 'huice-export'
     })

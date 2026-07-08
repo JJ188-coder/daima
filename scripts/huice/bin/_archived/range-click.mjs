@@ -152,7 +152,7 @@ async function main() {
     const data = await dumpGrid(page);
     log(`\n返回 ${data.rows.length} 行:`);
     data.rows.forEach((r, i) => log(`  [${i}] ${r[0]} → ${r[1]}`));
-    log(`\n${data.rows.length >= 20 ? '✅ 30天范围设置成功!' : '⚠ 还是默认范围,需逐日回采'}`);
+    log(`\n${data.rows.length >= 20 ? '✅ 多日范围设置成功!' : '⚠ 还是默认范围,需逐日回采'}`);
 
   } catch (err) {
     log('❌', err.message);

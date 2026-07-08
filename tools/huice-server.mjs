@@ -24,6 +24,7 @@ import {
   getProductProfitByDate,
   getDbPath,
 } from '../scripts/huice/lib/db.mjs';
+import { aggregateProfitRecords } from '../scripts/huice/lib/profit.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.HUICE_SERVER_PORT || '9911', 10);
@@ -39,42 +40,28 @@ function mapRow(row) {
     date: row.date,
     salesAmount: row.sales_amount,
     salesQuantity: row.sales_quantity,
+    orderCount: row.order_count,
     costPrice: row.cost_price,
+    grossProfit: row.gross_profit,
+    grossProfitRate: row.gross_profit_rate,
     refundAmount: row.refund_amount,
     refundRate: row.refund_rate,
+    rawNetProfit: row.raw_net_profit,
+    rawNetProfitRate: row.raw_net_profit_rate,
     netProfit: row.net_profit,
     netProfitRate: row.net_profit_rate,
+    orderFixedCost: row.order_fixed_cost,
+    platformFee: row.platform_fee,
+    platformFeeRate: row.platform_fee_rate,
+    orderFixedUnitCost: row.order_fixed_unit_cost,
+    profitFormulaVersion: row.profit_formula_version,
     source: 'huice-server',
   };
 }
 
 // 按 productId 聚合多天数据
 function aggregateByProduct(records) {
-  const byProduct = {};
-  for (const r of records) {
-    const pid = r.productId;
-    if (!pid) continue;
-    if (!byProduct[pid]) {
-      byProduct[pid] = { ...r };
-    } else {
-      const existing = byProduct[pid];
-      for (const field of ['salesAmount', 'salesQuantity', 'costPrice', 'refundAmount', 'netProfit']) {
-        const a = Number(existing[field]) || 0;
-        const b = Number(r[field]) || 0;
-        existing[field] = a || b ? a + b : null;
-      }
-      if (r.netProfitRate != null) existing.netProfitRate = r.netProfitRate;
-      if (r.refundRate != null) existing.refundRate = r.refundRate;
-    }
-  }
-  return Object.values(byProduct);
-}
-
-// 日期范围内所有天数据(直接查 SQLite,比逐天查快)
-function getProductProfitByDateRange(startDate, endDate) {
-  // 动态 import 避免改 db.mjs
-  const { Database } = require('better-sqlite3');
-  // 这个函数在 server 端直接查
+  return aggregateProfitRecords(records);
 }
 
 // CORS + JSON 响应
@@ -143,7 +130,7 @@ async function handler(req, res) {
       const start = url.searchParams.get('start');
       const end = url.searchParams.get('end');
       if (!start || !end) {
-        sendJson(res, { error: 'missing start or end param', usage: '/huice?start=2026-07-01&end=2026-07-07' }, 400);
+        sendJson(res, { error: 'missing start or end param', usage: '/huice?start=YYYY-MM-DD&end=YYYY-MM-DD' }, 400);
         return;
       }
 
@@ -178,8 +165,8 @@ server.listen(PORT, HOST, () => {
   console.log(`🚀 慧经营数据服务: http://${HOST}:${PORT}`);
   console.log(`   数据库: ${getDbPath()}`);
   console.log(`   GET /health  - 健康检查`);
-  console.log(`   GET /huice/2026-07-07  - 某天数据`);
-  console.log(`   GET /huice?start=2026-07-01&end=2026-07-07  - 范围数据`);
+  console.log(`   GET /huice/YYYY-MM-DD  - 某天数据`);
+  console.log(`   GET /huice?start=YYYY-MM-DD&end=YYYY-MM-DD  - 范围数据`);
   console.log(`   GET /huice/dates  - 有数据的日期列表`);
   console.log(`   Ctrl+C 停止`);
 });

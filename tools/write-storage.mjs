@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * write-storage.mjs - 从 SQLite 读 30 天数据,写入 dts 扩展 chrome.storage.local
+ * write-storage.mjs - 从 SQLite 读最近 N 天数据,写入 dts 扩展 chrome.storage.local
  *
- * 用法: node tools/write-storage.mjs [--days 30]
+ * 用法: node tools/write-storage.mjs [--days 7]
  */
 import { getProductProfitByDate } from '../scripts/huice/lib/db.mjs';
 
@@ -81,11 +81,21 @@ async function main() {
       shopName: r.shop_name || '',
       salesAmount: r.sales_amount ?? null,
       salesQuantity: r.sales_quantity ?? null,
+      orderCount: r.order_count ?? r.sales_quantity ?? null,
       costPrice: r.cost_price ?? null,
+      grossProfit: r.gross_profit ?? null,
+      grossProfitRate: r.gross_profit_rate ?? null,
       refundAmount: r.refund_amount ?? null,
       refundRate: r.refund_rate ?? null,
+      rawNetProfit: r.raw_net_profit ?? null,
+      rawNetProfitRate: r.raw_net_profit_rate ?? null,
       netProfit: r.net_profit ?? null,
       netProfitRate: r.net_profit_rate ?? null,
+      orderFixedCost: r.order_fixed_cost ?? null,
+      platformFee: r.platform_fee ?? null,
+      platformFeeRate: r.platform_fee_rate ?? null,
+      orderFixedUnitCost: r.order_fixed_unit_cost ?? null,
+      profitFormulaVersion: r.profit_formula_version ?? null,
       date: targetDate,
       source: 'huice-export'
     }));

@@ -2,7 +2,7 @@
 /**
  * set-range-test.mjs — 验证多维度页日期范围设置
  *
- * 目标:设日期范围 [30天前 ~ 昨日],查询,确认能拿到"昨日(2026-06-25)"行
+ * 目标:设日期范围 [N 天前 ~ 昨日],查询,确认能拿到昨日行
  *
  * 技巧:Element UI 的 el-date-editor 是 readonly,不能 fill。
  *       正确方式:点开面板 → 输入框聚焦 → 用键盘输入或点日历。
@@ -18,13 +18,13 @@ const config = loadConfig();
 const log = (...a) => console.log('[set-range]', ...a);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// 昨日 = 今天 -1;30天前 = 今天 -30
+// 昨日 = 今天 -1;默认起点 = 今天 -30
 function dateStr(offsetDays) {
   const d = new Date();
   d.setDate(d.getDate() + offsetDays);
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
-const START = dateStr(-30);  // 30天前
+const START = dateStr(-30);  // 默认起点
 const END = dateStr(-1);     // 昨日
 log(`目标范围: ${START} ~ ${END} (含昨日)`);
 
@@ -126,7 +126,7 @@ async function main() {
       });
       log('面板:', JSON.stringify(panelInfo, null, 2).slice(0, 600));
 
-      // 试试点快捷选项(如果有"最近30天")
+      // 试试点快捷选项(如果有最近一段时间)
       const quickClicked = await page.evaluate(() => {
         const shortcuts = document.querySelectorAll('.el-picker-panel__shortcut');
         for (const s of shortcuts) {
