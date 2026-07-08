@@ -11,7 +11,7 @@
  * 用法:
  *   node tools/huice-report.mjs                 # 昨天
  *   node tools/huice-report.mjs --days 7        # 近 7 天
- *   node tools/huice-report.mjs --date 2026-07-07  # 指定日期
+ *   node tools/huice-report.mjs --date YYYY-MM-DD  # 指定日期
  */
 
 import Database from 'better-sqlite3';

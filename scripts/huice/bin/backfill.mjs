@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * backfill.mjs — 汇策多维度利润 30 天回采 + 入库
+ * backfill.mjs — 汇策多维度利润按天数回采 + 入库
  *
  * 流程:
  *   1. 多维度页"按时间展示"Tab
@@ -9,7 +9,7 @@
  *   4. 写入 SQLite(daily_profit 表)
  *
  * 用法:
- *   node scripts/huice/bin/backfill.mjs                         # 默认: 拼【周贝瑞, 30天
+ *   node scripts/huice/bin/backfill.mjs                         # 默认店铺和默认天数
  *   node scripts/huice/bin/backfill.mjs --shop "拼【甜心"        # 指定店铺
  *   node scripts/huice/bin/backfill.mjs --days 60               # 指定回采天数
  *   node scripts/huice/bin/backfill.mjs --all-pdd               # 回采所有拼多多店铺

@@ -306,24 +306,24 @@
 
 ## [2026-06-26] huice 每日利润采集架构:多维度页 + 8:30 业务规则 + SQLite
 
-**背景**:需要每天自动拉昨日利润入库,匹配店透视商品报表。每日利润分析页(/daily)需逐日查(30 次),效率低;多维度页(/trendNew)"按时间展示"Tab 一次查询拿多天。
+**背景**:需要每天自动拉昨日利润入库,匹配店透视商品报表。每日利润分析页(/daily)需逐日查,效率低;多维度页(/trendNew)"按时间展示"Tab 一次查询拿多天。
 
 **决策**:
 1. **用多维度页"按时间展示"Tab** 一次查询拿 N 天时间序列(比 /daily 逐日查高效 N 倍)
 2. **8:30 业务规则**:汇策昨日数据每天 8:30 后才生成,定时任务设 9:00
 3. **SQLite 存储**(better-sqlite3):shops/daily_profit/fetch_log 三表,daily_profit 用 metrics_json 存 10 核算项
 4. **日期范围用点选**而非改 Vue data(Vue3 __vue__ 不可用):单箭头翻月 + 点日期单元格
-5. **首次回采 30 天 + 每天增量**:backfill.mjs --days 30 建库,daily.mjs 每天补昨日
+5. **首次回采 + 每天增量**:backfill.mjs 按需建库,daily.mjs 每天补昨日
 6. **打包 ~/.zcode/skills/huice/SKILL.md**:触发词 huice/汇策/抓利润
 
 **理由**:
-- 多维度页一次查询 30 天 = 1 次网络请求;逐日查 = 30 次(易超时/被限流)
+- 多维度页一次查询多天 = 1 次网络请求;逐日查容易超时/被限流
 - 8:30 是汇策业务特性,不是技术限制,必须遵守否则抓空
 - SQLite 比 JSON 查询强(按店铺/日期/商品 join),better-sqlite3 同步 API 简单
 
 **影响**:
 - 文件: scripts/huice/{bin/backfill.mjs, bin/daily.mjs, lib/db.mjs}
-- 数据库: private/huice-data.sqlite(已验证 28 天入库)
+- 数据库: private/huice-data.sqlite
 - skill: ~/.zcode/skills/huice/SKILL.md
 - 下一步: 对接 dts 扩展,把利润数据注入拼多多推广报表弹窗
 
@@ -385,7 +385,7 @@
 
 **撤销条件**:若商品分析页改版(AG-Grid 列 colId 变),需更新 `extractHuiceFromDOM` 的 colId 映射。
 
-**验证**:`npm run huice:sync` 抓 2026-06-25 → SQLite 22 条 + dts storage `getHuiceDataByDate('2026-06-25')` 返回 22 条(CDP 9222 实测)。
+**验证**:`npm run huice:sync` 可写入 SQLite + dts storage(CDP 9222 实测)。
 
 ---
 
@@ -460,30 +460,27 @@
 
 **影响文件**: `dts/source/pdd-enhancer.js` injectHuiceColumns L992-1010 + 版本 v16
 
-## [2026-07-08] 慧经营数据采集改用「导出全部」xlsx + 30 天回采建库
+## [2026-07-08] 慧经营数据采集改用「导出全部」xlsx
 
-**背景**: 接手开发后发现慧经营商品排名页 AG-Grid 只显示 22 条(虚拟滚动 + 分页限制),且列不全(需手动添加净利额/净利率列)。原 `extractHuiceFromDOM` DOM 提取方式数据量不足 + 列被隐藏。
+**背景**: 接手开发后发现慧经营商品排名页 AG-Grid 存在虚拟滚动和隐藏列问题。原 `extractHuiceFromDOM` DOM 提取方式容易漏行或漏列。
 
 **决策**:
-1. **采集方式改用「导出全部」xlsx** -- 点下载按钮 -> 导出全部 -> 去下载中心下载 xlsx -> openpyxl 解析。每天 637~809 条全量数据,17 列完整
-2. **30 天回采建库** -- `tools/huice-export-cdp.mjs --days 30` 一次性回采 30 天,21688 条入库 SQLite
-3. **日期切换用面板点击** -- element-ui el-date-picker 的 input.value 方式不生效,必须点 `.el-range-editor` 打开面板 -> 翻月 -> 点日期两次(单日范围)
-4. **getHuiceDataByDateRange 读日期范围** -- mms 弹窗选 7 天范围时,读 7 天的 huice 数据按 productId 聚合(多天数值相加)
+1. **采集方式改用「导出全部」xlsx** -- 点下载按钮 -> 导出全部 -> 去下载中心下载 xlsx -> openpyxl 解析。
+2. **日期切换用面板点击** -- element-ui el-date-picker 的 input.value 方式不生效,必须点 `.el-range-editor` 打开面板 -> 翻月 -> 点日期两次(单日范围)。
+3. **getHuiceDataByDateRange 读日期范围** -- mms 弹窗选多日范围时,读范围内 huice 数据按 productId 聚合并重算比例。
 
 **理由**:
-- xlsx 导出 637 条 vs DOM 提取 22 条,数据量差 30 倍
-- xlsx 包含全平台 111 店铺 2177 商品,DOM 只有视口内可见行
+- xlsx 导出比 DOM 虚拟滚动提取更完整。
 - 日期范围聚合:某商品某天无数据不代表整个范围无数据
 
 **影响文件**:
-- `tools/huice-export-cdp.mjs` -- 30 天回采工具(CDP + xlsx 导出 + openpyxl 解析)
+- `tools/huice-export-cdp.mjs` -- CDP + xlsx 导出 + openpyxl 解析
 - `tools/write-storage.mjs` -- SQLite -> dts storage 写入
 - `tools/cdp-eval.mjs` / `cdp-click.mjs` / `cdp-wait-toolbox.mjs` -- CDP 工具集
 - `dts/source/pdd-enhancer.js` -- getHuiceDataByDateRange 日期范围聚合
 - `scripts/huice-sync.mjs` -- CDP 复用 + --backfill 参数
-- `private/huice-data.sqlite` -- 30 天 21688 条数据(gitignored)
 
-**验证**: mms 弹窗近7天,4 真列显示真实数据(净利润 276.68 / 净利率 33.43% / 推广费比 13.07% / 保本ROI 4.73)
+**验证**: mms 弹窗多日范围能读取并聚合慧经营数据。
 
 **撤销条件**: 慧经营关闭「导出全部」功能或改版 xlsx 格式
 

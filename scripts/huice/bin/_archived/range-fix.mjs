@@ -111,10 +111,10 @@ async function main() {
     log('input 值:', JSON.stringify(inputVals));
 
     // ========== C. 用找到的 Vue 路径直接改 data ==========
-    log('\n=== C. 直接改 Vue data 设 30 天范围 ===');
+    log('\n=== C. 直接改 Vue data 设多日范围 ===');
     if (afterClick && afterClick.path) {
       log(`找到 Vue 路径: ${afterClick.path}`);
-      // 改成 30 天前到昨日
+      // 改成默认起点到昨日
       const end = new Date(); end.setDate(end.getDate() - 1);
       const start = new Date(); start.setDate(start.getDate() - 30);
       const startStr = `${start.getFullYear()}-${String(start.getMonth()+1).padStart(2,'0')}-${String(start.getDate()).padStart(2,'0')}`;

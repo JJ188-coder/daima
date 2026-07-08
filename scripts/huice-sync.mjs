@@ -27,6 +27,7 @@ import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs';
 import path from 'path';
 import http from 'http';
 import { fileURLToPath } from 'url';
+import { normalizeProfitRecord } from './huice/lib/profit.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -101,11 +102,14 @@ function extractHuiceFromDOM(dateOverride) {
         shopName,
         salesAmount: pn(byColId.receivableAmount),
         salesQuantity: pn(byColId.payQty),
+        orderCount: pn(byColId.payQty),
         costPrice: pn(byColId.costAmount),
+        grossProfit: pn(byColId.grossProfit),
+        grossProfitRate: pp(byColId.grossProfitRateString),
         refundAmount: pn(byColId.refundAmount),
         refundRate: pp(byColId.refundRateString),
-        netProfit: pn(byColId.netProfit),
-        netProfitRate: pp(byColId.netInterestString),
+        rawNetProfit: pn(byColId.netProfit),
+        rawNetProfitRate: pp(byColId.netInterestString),
         date: dateOverride,
         source: 'huice'
       });
@@ -153,10 +157,11 @@ function extractHuiceFromDOM(dateOverride) {
         shopName: shopIdx >= 0 ? cells[shopIdx] : '',
         salesAmount: pn(cells[salesAmtIdx]),
         salesQuantity: salesQtyIdx >= 0 ? parseInt(String(cells[salesQtyIdx]).replace(/,/g, '')) || 0 : 0,
+        orderCount: salesQtyIdx >= 0 ? parseInt(String(cells[salesQtyIdx]).replace(/,/g, '')) || 0 : 0,
         refundAmount: pn(cells[refundAmtIdx]),
         refundRate: pp(cells[refundRateIdx]),
-        netProfit: pn(cells[netProfitIdx]),
-        netProfitRate: pp(cells[netProfitRateIdx]),
+        rawNetProfit: pn(cells[netProfitIdx]),
+        rawNetProfitRate: pp(cells[netProfitRateIdx]),
         costPrice: pn(cells[costIdx]),
         date: dateOverride,
         source: 'huice'
@@ -506,7 +511,7 @@ async function main() {
     await page.waitForTimeout(3000);
 
     // 提取表格
-    const records = await page.evaluate(extractHuiceFromDOM, targetDate);
+    const records = (await page.evaluate(extractHuiceFromDOM, targetDate)).map(r => normalizeProfitRecord(r));
     if (records.length > 0) {
       allRecords.push(...records);
       console.log(`  ✅ ${records.length} 条记录 (netProfit 有值: ${records.filter(r => r.netProfit != null).length})`);

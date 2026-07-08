@@ -13,6 +13,7 @@ import Database from 'better-sqlite3';
 import { existsSync, mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalizeProfitRecord } from './profit.mjs';
 
 const __dirname = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const DB_PATH = resolve(__dirname, 'private/huice-data.sqlite');
@@ -85,28 +86,8 @@ function initSchema(db) {
 
   // 商品级利润表(huice-sync.mjs 抓商品分析页,每商品每日一行)
   // 区别于 daily_profit(店铺级),这里按 product_id 维度存,带净利/退款/销量等
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS product_profit (
-      product_id     TEXT NOT NULL,               -- 商品链接ID(拼多多 goodsId)
-      product_name   TEXT,
-      shop_name      TEXT,
-      shop_id        INTEGER,                     -- 关联 shops(可空,未匹配时留空)
-      date           TEXT NOT NULL,               -- YYYY-MM-DD
-      sales_amount   REAL,
-      sales_quantity INTEGER,
-      refund_amount  REAL,
-      refund_rate    REAL,                        -- 小数(0.05 = 5%)
-      net_profit     REAL,
-      net_profit_rate REAL,                       -- 小数
-      cost_price     REAL,
-      raw_json       TEXT,                        -- 完整 record(调试)
-      captured_at    TEXT DEFAULT (datetime('now')),
-      PRIMARY KEY (product_id, date),
-      FOREIGN KEY (shop_id) REFERENCES shops(shop_id)
-    );
-    CREATE INDEX IF NOT EXISTS idx_product_profit_date ON product_profit(date);
-    CREATE INDEX IF NOT EXISTS idx_product_profit_shop ON product_profit(shop_name, date);
-  `);
+  db.exec(productProfitTableSql('product_profit'));
+  ensureProductProfitSchema(db);
 
   // 抓取日志
   db.exec(`
@@ -121,6 +102,85 @@ function initSchema(db) {
       error         TEXT,
       created_at    TEXT DEFAULT (datetime('now'))
     );
+  `);
+}
+
+function productProfitTableSql(tableName) {
+  return `
+    CREATE TABLE IF NOT EXISTS ${tableName} (
+      product_id     TEXT NOT NULL,               -- 商品链接ID(拼多多 goodsId)
+      product_name   TEXT,
+      shop_name      TEXT NOT NULL DEFAULT '',
+      shop_id        INTEGER,                     -- 关联 shops(可空,未匹配时留空)
+      date           TEXT NOT NULL,               -- YYYY-MM-DD
+      sales_amount   REAL,
+      sales_quantity INTEGER,
+      order_count    INTEGER,                     -- 当前口径:销售件数即订单数
+      refund_amount  REAL,
+      refund_rate    REAL,                        -- 小数(0.05 = 5%)
+      gross_profit   REAL,
+      gross_profit_rate REAL,
+      raw_net_profit REAL,                        -- 慧经营原始净利额
+      raw_net_profit_rate REAL,
+      net_profit     REAL,                        -- 额外扣减后的净利润
+      net_profit_rate REAL,                       -- 调整后净利率
+      cost_price     REAL,                        -- 慧经营销售成本金额
+      order_fixed_cost REAL,                      -- 1.15元/订单
+      platform_fee   REAL,
+      platform_fee_rate REAL,
+      order_fixed_unit_cost REAL,
+      profit_formula_version TEXT,
+      raw_json       TEXT,                        -- 完整 record(调试)
+      captured_at    TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (shop_name, product_id, date),
+      FOREIGN KEY (shop_id) REFERENCES shops(shop_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_profit_date ON product_profit(date);
+    CREATE INDEX IF NOT EXISTS idx_product_profit_shop ON product_profit(shop_name, date);
+  `;
+}
+
+function ensureProductProfitSchema(db) {
+  const cols = db.prepare('PRAGMA table_info(product_profit)').all();
+  const names = new Set(cols.map(c => c.name));
+  const addColumn = (name, ddl) => {
+    if (!names.has(name)) db.exec(`ALTER TABLE product_profit ADD COLUMN ${name} ${ddl}`);
+  };
+  addColumn('order_count', 'INTEGER');
+  addColumn('gross_profit', 'REAL');
+  addColumn('gross_profit_rate', 'REAL');
+  addColumn('raw_net_profit', 'REAL');
+  addColumn('raw_net_profit_rate', 'REAL');
+  addColumn('order_fixed_cost', 'REAL');
+  addColumn('platform_fee', 'REAL');
+  addColumn('platform_fee_rate', 'REAL');
+  addColumn('order_fixed_unit_cost', 'REAL');
+  addColumn('profit_formula_version', 'TEXT');
+
+  const pkCols = cols.filter(c => c.pk).sort((a, b) => a.pk - b.pk).map(c => c.name);
+  if (pkCols.join(',') === 'shop_name,product_id,date') return;
+
+  const backup = `product_profit_backup_${Date.now()}`;
+  db.exec(`ALTER TABLE product_profit RENAME TO ${backup}`);
+  db.exec(productProfitTableSql('product_profit'));
+  db.exec(`
+    INSERT OR REPLACE INTO product_profit (
+      product_id, product_name, shop_name, shop_id, date,
+      sales_amount, sales_quantity, order_count,
+      refund_amount, refund_rate, gross_profit, gross_profit_rate,
+      raw_net_profit, raw_net_profit_rate, net_profit, net_profit_rate,
+      cost_price, order_fixed_cost, platform_fee, platform_fee_rate,
+      order_fixed_unit_cost, profit_formula_version, raw_json, captured_at
+    )
+    SELECT
+      product_id, product_name, COALESCE(shop_name, ''), shop_id, date,
+      sales_amount, sales_quantity, order_count,
+      refund_amount, refund_rate, gross_profit, gross_profit_rate,
+      COALESCE(raw_net_profit, net_profit), COALESCE(raw_net_profit_rate, net_profit_rate),
+      net_profit, net_profit_rate,
+      cost_price, order_fixed_cost, platform_fee, platform_fee_rate,
+      order_fixed_unit_cost, profit_formula_version, raw_json, captured_at
+    FROM ${backup}
   `);
 }
 
@@ -199,46 +259,69 @@ export function getDailyProfitRange(shopId, startDate, endDate) {
 /** 商品级:单条 upsert(来自 huice-sync.mjs 抓的 record) */
 export function upsertProductProfit(record) {
   const db = getDb();
+  const normalized = normalizeProfitRecord(record);
   // 尝试用 shopName 反查 shop_id(可选关联)
   let shopId = null;
-  if (record.shopName) {
+  if (normalized.shopName) {
     // shopName 可能是"拼【周贝瑞"格式,也可能纯店名;都试一遍
-    shopId = db.prepare('SELECT shop_id FROM shops WHERE huice_name = ? OR shop_name = ?').get(record.shopName, record.shopName)?.shop_id || null;
+    shopId = db.prepare('SELECT shop_id FROM shops WHERE huice_name = ? OR shop_name = ?').get(normalized.shopName, normalized.shopName)?.shop_id || null;
   }
   const stmt = db.prepare(`
     INSERT INTO product_profit
       (product_id, product_name, shop_name, shop_id, date,
-       sales_amount, sales_quantity, refund_amount, refund_rate,
-       net_profit, net_profit_rate, cost_price, raw_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(product_id, date) DO UPDATE SET
+       sales_amount, sales_quantity, order_count,
+       refund_amount, refund_rate, gross_profit, gross_profit_rate,
+       raw_net_profit, raw_net_profit_rate, net_profit, net_profit_rate,
+       cost_price, order_fixed_cost, platform_fee, platform_fee_rate,
+       order_fixed_unit_cost, profit_formula_version, raw_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(shop_name, product_id, date) DO UPDATE SET
       product_name  = excluded.product_name,
-      shop_name     = excluded.shop_name,
       shop_id       = excluded.shop_id,
       sales_amount  = excluded.sales_amount,
       sales_quantity= excluded.sales_quantity,
+      order_count   = excluded.order_count,
       refund_amount = excluded.refund_amount,
       refund_rate   = excluded.refund_rate,
+      gross_profit  = excluded.gross_profit,
+      gross_profit_rate = excluded.gross_profit_rate,
+      raw_net_profit = excluded.raw_net_profit,
+      raw_net_profit_rate = excluded.raw_net_profit_rate,
       net_profit    = excluded.net_profit,
       net_profit_rate = excluded.net_profit_rate,
       cost_price    = excluded.cost_price,
+      order_fixed_cost = excluded.order_fixed_cost,
+      platform_fee  = excluded.platform_fee,
+      platform_fee_rate = excluded.platform_fee_rate,
+      order_fixed_unit_cost = excluded.order_fixed_unit_cost,
+      profit_formula_version = excluded.profit_formula_version,
       raw_json      = excluded.raw_json,
       captured_at   = datetime('now')
   `);
   return stmt.run(
-    String(record.productId),
-    record.productName || null,
-    record.shopName || null,
+    String(normalized.productId),
+    normalized.productName || null,
+    normalized.shopName || '',
     shopId,
-    record.date,
-    record.salesAmount ?? null,
-    record.salesQuantity ?? null,
-    record.refundAmount ?? null,
-    record.refundRate ?? null,
-    record.netProfit ?? null,
-    record.netProfitRate ?? null,
-    record.costPrice ?? null,
-    JSON.stringify(record)
+    normalized.date,
+    normalized.salesAmount ?? null,
+    normalized.salesQuantity ?? null,
+    normalized.orderCount ?? null,
+    normalized.refundAmount ?? null,
+    normalized.refundRate ?? null,
+    normalized.grossProfit ?? null,
+    normalized.grossProfitRate ?? null,
+    normalized.rawNetProfit ?? null,
+    normalized.rawNetProfitRate ?? null,
+    normalized.netProfit ?? null,
+    normalized.netProfitRate ?? null,
+    normalized.costPrice ?? null,
+    normalized.orderFixedCost ?? null,
+    normalized.platformFee ?? null,
+    normalized.platformFeeRate ?? null,
+    normalized.orderFixedUnitCost ?? null,
+    normalized.profitFormulaVersion ?? null,
+    JSON.stringify(normalized)
   );
 }
 

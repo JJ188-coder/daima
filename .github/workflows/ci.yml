@@ -20,11 +20,10 @@ jobs:
         run: npm ci || npm install
 
       - name: Check JS syntax
-        run: |
-          # 检查所有 .mjs 文件语法
-          find tools scripts -name "*.mjs" -print0 | xargs -0 -I{} node --check {} || true
-          # 检查 pdd-enhancer.js 语法
-          node --check dts/source/pdd-enhancer.js
+        run: npm run check:js
+
+      - name: Run tests
+        run: npm test
 
       - name: Validate manifest.json
         run: |

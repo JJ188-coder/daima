@@ -4,7 +4,7 @@
  *
  * 重点:
  * 1. 完整 dump 表头(每列含义)
- * 2. 设置日期范围(过去30天)后查询,拿到完整时间序列
+ * 2. 设置日期范围后查询,拿到完整时间序列
  * 3. 探索 4 个 Tab(按时间/店铺/明细/平台)各自字段
  * 4. 找商品ID字段(匹配拼多多 goodsId)
  */
@@ -79,15 +79,15 @@ async function main() {
 
     await page.screenshot({ path: resolve(shotDir, 'multi-time-tab.png'), fullPage: true });
 
-    // ===== 3. 设置日期范围为过去30天 =====
-    log('\n=== 3. 尝试设置30天日期范围 ===');
+    // ===== 3. 设置日期范围 =====
+    log('\n=== 3. 尝试设置多日日期范围 ===');
     const dateSet = await setDateRange(page, 30);
     log('设日期范围:', dateSet);
 
     if (dateSet.ok) {
       await sleep(8000);
       const data30 = await dumpGridAll(page);
-      log(`30天范围返回 ${data30.rows.length} 行:`);
+      log(`多日范围返回 ${data30.rows.length} 行:`);
       data30.rows.slice(0, 5).forEach((r, i) => log(`  [${i}] ${r.join(' | ')}`));
       data30.rows.slice(-3).forEach((r, i) => log(`  ...[${data30.rows.length-3+i}] ${r.join(' | ')}`));
       result.data30Days = data30;
@@ -269,7 +269,7 @@ async function setDateRange(page, days) {
   }, { startStr, endStr });
   log('Vue 日期组件探测:', JSON.stringify(setViaVue)?.slice(0, 200));
 
-  // 方案 B: 点日期面板的快捷按钮(如果有"最近30天")
+      // 方案 B: 点日期面板的快捷按钮(如果有最近一段时间)
   const quickSet = await page.evaluate(() => {
     const panels = document.querySelectorAll('.el-picker-panel, .el-date-picker, [class*="picker"]');
     for (const p of panels) {

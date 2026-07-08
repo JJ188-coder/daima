@@ -394,19 +394,19 @@ left.querySelector('.el-icon-arrow-left:not(.el-icon-d-arrow-left)')
 - [2026-07-08] AG-Grid 虚拟滚动隐藏列 -> 根因:列太多超出视口 -> 修复:用「导出全部」xlsx
   - **现象**: 慧经营商品排名页加了净利额/净利率/退款等列后,`receivableAmount`/`payQty`/`costAmount` 被虚拟滚动隐藏,extractHuiceFromDOM 读到 null
   - **根因**: AG-Grid 横向虚拟滚动,只有视口内的列有 DOM,超宽列不渲染
-  - **修复**: 放弃 DOM 提取,改用「导出全部」下载 xlsx(637 条全量数据,17 列完整),用 openpyxl 解析入库
-  - **教训**: **AG-Grid 列多时 DOM 提取不可靠,用「导出全部」xlsx 拿全量数据**。xlsx 637 条 vs DOM 22 条,数据量差 30 倍
+  - **修复**: 放弃 DOM 提取,改用「导出全部」下载 xlsx,用 openpyxl 解析入库
+  - **教训**: **AG-Grid 列多时 DOM 提取不可靠,用「导出全部」xlsx 拿全量数据**。
   - **影响文件**: `tools/huice-export-cdp.mjs`(替代 `tools/huice-backfill-cdp.mjs` 的 DOM 提取)
 
 - [2026-07-08] getHuiceDataByDate 只读开始日期 -> 根因:7天范围只读1天 -> 修复:getHuiceDataByDateRange
-  - **现象**: mms 弹窗选近7天(7/1~7/7),4 真列全 null,但 storage 里 `pdd_huice_window_2026-07-01` 有数据
-  - **根因**: pdd-enhancer.js L732 `getHuiceDataByDate(startDate)` 只读开始日期(7/1)一天的 storage。但某商品 7/1 单日可能无数据(下架/无销量),7/2~7/7 有数据。只读 7/1 = 匹配不上
+  - **现象**: mms 弹窗选多日范围时,4 真列全 null,但 storage 里范围内有数据
+  - **根因**: pdd-enhancer.js `getHuiceDataByDate(startDate)` 只读开始日期一天的 storage。但某商品开始日可能无数据,后续日期有数据。只读开始日期 = 匹配不上
   - **修复**: 新增 `getHuiceDataByDateRange(startDate, endDate)` -- 读日期范围内所有 `pdd_huice_window_<date>` 的数据,按 productId 聚合(多天数值相加)
   - **教训**: **日期范围查询要读范围内所有天,不能只读开始日期**。商品某天无数据不代表整个范围无数据
   - **影响文件**: `dts/source/pdd-enhancer.js` `getHuiceDataByDateRange()`
 
 - [2026-07-08] 日期面板残留 Vue 状态导致选择错误 -> 根因:切换日期后面板残留上次选择 -> 修复:每天循环重载页面
-  - **现象**: 30 天回采第 2 天开始,日期切换后面板仍显示上一天的选中状态,导致点日期点到错的单元格
+  - **现象**: 连续回采多日时,日期切换后面板仍显示上一天的选中状态,导致点日期点到错的单元格
   - **根因**: element-ui el-date-range-picker 面板是 Vue 管理的 DOM,切换日期后面板状态不清空,残留的 `start-date`/`end-date`/`in-range` class 影响下次选择
   - **修复**: 每天循环开始时 `location.reload()` 重载页面,清除所有 Vue 组件状态。同时 `setDateRangeByPanel` 里加「先点别的日期清旧选择」逻辑
   - **教训**: **element-ui 日期面板有残留状态,跨日期切换要重载页面**。Vue 组件状态不会因 DOM 操作自动清空
