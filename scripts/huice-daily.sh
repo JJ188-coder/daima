@@ -10,10 +10,13 @@
 
 set -e
 
-PROJECT_DIR="/Users/jiyuanyi/Documents/daima"
+# 路径自动推导: 本脚本所在目录的上一级 = 项目根
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOG_PREFIX="[huice-daily $(date '+%Y-%m-%d %H:%M:%S')]"
 
 echo "$LOG_PREFIX === 每日慧经营数据同步开始 ==="
+echo "$LOG_PREFIX 项目目录: $PROJECT_DIR"
 
 cd "$PROJECT_DIR"
 

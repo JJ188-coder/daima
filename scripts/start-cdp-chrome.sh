@@ -4,6 +4,11 @@
 #
 # LaunchAgent: com.daima.cdp-chrome（开机启动）
 
+# 路径自动推导: 本脚本所在目录的上一级 = 项目根
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+DTS_DIR="$PROJECT_DIR/dts"
+
 # 检查是否已在运行
 if lsof -nP -iTCP:9222 -sTCP:LISTEN > /dev/null 2>&1; then
   echo "[cdp-chrome] 9222 端口已在线,跳过"
@@ -18,7 +23,7 @@ nohup "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
   --user-data-dir="$HOME/.chrome-cdp-profile" \
   --remote-debugging-port=9222 \
   --enable-extensions \
-  --load-extension="$HOME/Documents/daima/dts" \
+  --load-extension="$DTS_DIR" \
   --no-first-run \
   --no-default-browser-check \
   --disable-features=TranslateUI \

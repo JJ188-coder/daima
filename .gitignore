@@ -2,6 +2,7 @@
 .env
 private/
 *-unpacked/
+daima-data-backup.tar.gz
 
 # === 数据库 / 运行时产物 ===
 *.sqlite
