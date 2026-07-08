@@ -1,16 +1,52 @@
-# 店透视 + 慧经营数据采集
+# 店透视 - 拼多多利润增强工具
 
-> Chrome 扩展增强拼多多商品报表 + 慧经营数据自动采集入库
-
-## 一句话介绍
-
-在拼多多商品报表弹窗里注入 6 列慧经营真实数据（净利润/净利率/毛利率/退款额/推广费比/保本ROI），每天自动采集慧经营数据到本地 SQLite，亏损商品标红一目了然。
+> 给朋友用的版本。装好之后，拼多多商品报表里直接看每個商品的净利润、毛利率、退款额，亏损的红色标出来，每天自动同步数据。
 
 ---
 
-## 快速开始（3 步）
+## 这东西能干嘛？
 
-### 第 1 步：克隆项目
+你在拼多多后台看商品报表的时候，只有销量、访客这些数据，**看不到每个商品到底赚没赚钱**。
+
+这个工具做的事：
+
+1. **自动从慧经营采集数据**（每天 09:00 自动跑，不用你管）
+2. **在拼多多商品报表弹窗里加 6 列真实数据**：
+
+| 列名 | 举个例子 | 说明 |
+|---|---|---|
+| 净利润 | ¥123.45 | 扣了包装人工(1.15元/单) + 平台费(2%)之后真正赚到的钱 |
+| 净利率 | 33.43% | 净利润 ÷ 销售额 |
+| 毛利率 | 45.20% | 慧经营原始毛利率 |
+| 退款额 | ¥56.78 | 当期退款总金额 |
+| 推广费比 | 13.07% | 推广花了多少钱占 GMV 多少 |
+| 保本ROI | 4.73 | 销售额 ÷ 净利润，低于这个 ROI 就亏 |
+
+3. **亏损商品自动标红**，一眼就能看出来哪些在亏钱
+
+4. **运营看板**，终端跑一下就能看：哪些商品亏最多、哪些赚最多、哪个店铺表现最好
+
+---
+
+## 装之前先准备好这些
+
+你的电脑需要有这三个东西：
+
+| 要装的 | 去哪下 | 为什么要 |
+|---|---|---|
+| **Node.js 20+** | https://nodejs.org | 跑数据采集脚本 |
+| **Google Chrome** | https://www.google.com/chrome/ | 拼多多 + 慧经营 + 扩展载体 |
+| **git** | https://git-scm.com/ | 下载代码 |
+
+Mac 自带 git 和 python3（装了 Xcode Command Line Tools 就有）。
+
+---
+
+## 安装步骤
+
+### 第 1 步：下载代码
+
+打开终端（Mac）或 PowerShell（Windows），跑：
 
 ```bash
 git clone https://github.com/JJ188-coder/daima.git
@@ -19,223 +55,187 @@ cd daima
 
 ### 第 2 步：一键部署
 
-**macOS：**
+**Mac：**
 ```bash
 ./install.sh
 ```
 
-**Windows（PowerShell）：**
+**Windows：**
 ```powershell
 .\install.ps1
 ```
 
-部署脚本会自动完成：
-- ✅ 检查 Node 20+ / Chrome / git
-- ✅ 安装 Node 依赖（better-sqlite3 等）
-- ✅ 交互式配置慧经营凭证
-- ✅ 导入历史数据（如果有备份）
-- ✅ 设定每日 09:00 定时采集
-- ✅ 启动 CDP Chrome
+它会自动帮你装依赖、配凭证、设定时任务、启动 Chrome。中间会问你几个问题：
+
+```
+商家 ID (HUICE_SELLER_ID): ______     ← 你的慧经营商家 ID
+用户名 (HUICE_USERNAME): ______       ← 慧经营登录用户名
+密码 (HUICE_PASSWORD): ______         ← 慧经营登录密码
+```
+
+这些信息只存在你电脑本地的 `private/huice.env` 文件里，不会上传到任何地方。
 
 ### 第 3 步：登录慧经营
 
-CDP Chrome 会自动打开，在地址栏输入：
+部署完之后 Chrome 会自动打开。在地址栏输入：
 
 ```
 https://hjy.huice.com/
 ```
 
-登录后**保持标签页打开**。然后手动采集一次测试：
+登录之后**保持这个标签页开着不要关**。定时任务需要这个标签页才能采集数据。
+
+### 第 4 步：手动跑一次测试
+
+确认一切正常：
 
 ```bash
-node tools/huice-export-cdp.mjs --days 1    # 采昨天数据
-node tools/write-storage.mjs --days 1        # 写入扩展
+node tools/huice-export-cdp.mjs --days 1    # 采昨天的数据
+node tools/write-storage.mjs --days 1        # 写进扩展
+```
+
+看到 `✅ 回采完成` 就说明成功了。
+
+### 第 5 步：打开拼多多看看效果
+
+打开 https://mms.pinduoduo.com/sycm/goods_effect
+
+点任意一个商品，弹窗表格里会多出 6 列绿色表头的数据，就是你的慧经营真实数据了。
+
+---
+
+## 装好之后日常怎么用
+
+### 自动的（不用管）
+
+- 每天早上 **9 点**自动采集昨天的数据
+- 开机自动启动 Chrome
+- 你只需要保证 Chrome 里慧经营标签页是登录状态
+
+### 手动操作
+
+| 你想干嘛 | 跑什么命令 |
+|---|---|
+| 采集 30 天历史数据 | `node tools/huice-export-cdp.mjs --days 30` |
+| 补采某几天的数据 | `node tools/huice-export-cdp.mjs --dates 2026-07-05,2026-07-06` |
+| 把数据写进扩展 | `node tools/write-storage.mjs --days 7` |
+| 看运营看板 | `node tools/huice-report.mjs --days 7` |
+| 手动启动 Chrome | `bash scripts/start-cdp-chrome.sh`（Mac）/ `powershell -File scripts\start-cdp-chrome.ps1`（Windows） |
+
+### 运营看板长这样
+
+```
+📊 慧经营运营看板 (近 7 天)
+════════════════════════════════════════
+总览:
+  销售额: ¥125,680.00
+  净利润: ¥38,420.50
+  退款额: ¥5,230.00
+  亏损商品: 12 个
+
+🔻 亏损 TOP 5:
+  1. 某某零食  -¥1,230.00
+  2. 某某坚果  -¥890.50
+  ...
+
+📈 盈利 TOP 5:
+  1. 某某肉干  +¥5,680.00
+  2. 某某饼干  +¥3,420.00
+  ...
 ```
 
 ---
 
-## 前置要求
+## 换电脑怎么办？
 
-| 依赖 | 版本 | 说明 |
-|---|---|---|
-| Node.js | 20+ | http://nodejs.org |
-| Google Chrome | 最新版 | 拼多多后台 + 慧经营 + 扩展载体 |
-| git | 任意 | 克隆代码 |
-
-macOS 自带 python3（仅用于 JSON 解析，无第三方依赖）。
-
----
-
-## 从旧机器迁移数据
-
-### 导出（旧机器上跑）
+### 旧电脑导出
 
 ```bash
 cd /path/to/daima
 ./export-data.sh
-# 生成 daima-data-backup.tar.gz
 ```
 
-### 导入（新机器上）
+会生成一个 `daima-data-backup.tar.gz`（3MB 左右），里面包含：
+- 所有历史数据（SQLite 数据库）
+- 慧经营登录状态
+- 凭证文件
 
-把 `daima-data-backup.tar.gz` 拷到新机器，放在 `daima/` 根目录下，然后跑 `install.sh`，会自动检测并导入。
+### 新电脑导入
+
+把 `daima-data-backup.tar.gz` 拷到新电脑，放在 `daima/` 目录下，然后跑 `./install.sh`，会自动检测并导入。
 
 ---
 
-## 功能说明
+## 常见问题
 
-### 6 列真实数据注入
+### Q: Chrome 没自动打开 / 9222 端口不通
 
-在拼多多商品报表弹窗（`mms.pinduoduo.com/sycm/goods_effect`）点击任意商品，弹窗表格会多出 6 列绿色表头的数据：
-
-| 列名 | 说明 | 格式 |
-|---|---|---|
-| 净利润 | 扣除包装人工(1.15元/单) + 平台费(2%)后的利润 | ¥123.45（亏损红色加粗） |
-| 净利率 | 净利润 / 销售额 | 33.43% |
-| 毛利率 | 慧经营原始毛利率 | 45.20% |
-| 退款额 | 当期退款总金额 | ¥56.78 |
-| 推广费比 | 推广花费 / GMV | 13.07% |
-| 保本ROI | 销售额 / 净利润 | 4.73 |
-
-### 每日自动同步
-
-- **09:00** 自动采集前一天慧经营数据
-- 数据存入 `private/huice-data.sqlite`
-- 自动写入扩展 storage，刷新拼多多页面即可看到最新数据
-
-### 运营看板
-
+手动启动：
 ```bash
-node tools/huice-report.mjs --days 7     # 最近 7 天
-node tools/huice-report.mjs --days 30    # 最近 30 天
-node tools/huice-report.mjs --date 2026-07-07  # 指定日期
-```
-
-输出：
-- 总览（总销售额/总净利润/总退款/亏损商品数）
-- 亏损 TOP 10
-- 盈利 TOP 10
-- 店铺排名
-
----
-
-## 常用命令
-
-| 命令 | 说明 |
-|---|---|
-| `./install.sh` | 一键部署（macOS） |
-| `.\install.ps1` | 一键部署（Windows） |
-| `./export-data.sh` | 导出数据（换电脑用） |
-| `node tools/huice-export-cdp.mjs --days 30` | 采集 30 天数据 |
-| `node tools/huice-export-cdp.mjs --dates 2026-07-01,2026-07-02` | 采集指定日期 |
-| `node tools/write-storage.mjs --days 7` | 写入 7 天数据到扩展 |
-| `node tools/huice-report.mjs --days 7` | 查看 7 天运营看板 |
-| `bash scripts/start-cdp-chrome.sh` | 手动启动 CDP Chrome |
-
----
-
-## 项目结构
-
-```
-daima/
-├── install.sh              # macOS 一键部署
-├── install.ps1             # Windows 一键部署
-├── export-data.sh          # 数据导出（换电脑用）
-├── dts/                    # Chrome MV3 扩展「店透视」v5.0.17
-│   ├── manifest.json
-│   └── source/pdd-enhancer.js  # 核心注入逻辑
-├── tools/                  # CDP 工具集
-│   ├── huice-export-cdp.mjs    # 慧经营数据采集
-│   ├── write-storage.mjs       # SQLite -> 扩展 storage
-│   └── huice-report.mjs        # 运营看板
-├── scripts/                # 定时任务脚本
-│   ├── start-cdp-chrome.sh(.ps1)  # CDP Chrome 启动
-│   └── huice-daily.sh(.ps1)      # 每日同步
-└── private/                # 凭证 + 数据库（gitignored）
-    ├── huice.env               # 慧经营凭证
-    └── huice-data.sqlite       # SQLite 数据库
-```
-
----
-
-## 故障排查
-
-### CDP Chrome 没启动 / 9222 端口不通
-
-```bash
-# 手动启动
-bash scripts/start-cdp-chrome.sh      # macOS
+bash scripts/start-cdp-chrome.sh        # Mac
 powershell -File scripts\start-cdp-chrome.ps1  # Windows
-
-# 检查是否在线
-curl http://127.0.0.1:9222/json/version
 ```
 
-### 扩展没加载
+### Q: 数据没显示在拼多多报表里
 
-CDP Chrome 需要带 `--enable-extensions --load-extension=dts/` 启动。`install.sh` 会自动处理，手动启动 Chrome 不行。
-
-### 慧经营标签页不存在
-
-在 CDP Chrome 里打开 `https://hjy.huice.com/` 并登录，保持标签页打开。定时任务需要这个标签页才能采集数据。
-
-### 采集失败
-
-```bash
-# 看日志
-cat /tmp/huice-daily.log              # macOS
-type %TEMP%\huice-daily.log           # Windows
-
-# 补采失败日期
-node tools/huice-export-cdp.mjs --dates 2026-07-05,2026-07-06
-```
-
-### 扩展列没显示数据
-
-1. 确认拼多多商品报表弹窗已打开（点击任意商品的「数据分析」）
-2. 确认 storage 有数据：`node tools/write-storage.mjs --days 7`
+1. 确认慧经营标签页是登录状态
+2. 跑一下：`node tools/write-storage.mjs --days 7`
 3. 刷新拼多多页面
 
----
+### Q: 采集失败了
 
-## 定时任务
-
-### macOS（launchd）
-
-| 任务 | 时间 | 作用 |
-|---|---|---|
-| com.daima.cdp-chrome | 开机时 | 启动 CDP Chrome |
-| com.daima.huice-daily | 每天 09:00 | 采集前一天数据 |
-
+看日志找原因：
 ```bash
-# 查看状态
-launchctl list | grep daima
+cat /tmp/huice-daily.log          # Mac
+type %TEMP%\huice-daily.log      # Windows
+```
 
-# 卸载
-launchctl unload ~/Library/LaunchAgents/com.daima.cdp-chrome.plist
+补采失败的日期：
+```bash
+node tools/huice-export-cdp.mjs --dates 2026-07-05
+```
+
+### Q: 凭证填错了想改
+
+直接编辑 `private/huice.env` 文件，改成正确的值就行。
+
+### Q: 不想每天自动跑了
+
+**Mac：**
+```bash
 launchctl unload ~/Library/LaunchAgents/com.daima.huice-daily.plist
 ```
 
-### Windows（计划任务）
-
-| 任务 | 时间 | 作用 |
-|---|---|---|
-| Daima_CDP_Chrome | 登录时 | 启动 CDP Chrome |
-| Daima_Huice_Daily | 每天 09:00 | 采集前一天数据 |
-
+**Windows：**
 ```powershell
-# 查看状态
-schtasks /Query /TN "Daima_Huice_Daily"
-
-# 手动触发
-schtasks /Run /TN "Daima_Huice_Daily"
+schtasks /Delete /TN "Daima_Huice_Daily" /F
 ```
 
 ---
 
 ## 安全说明
 
-- 慧经营凭证只存在 `private/huice.env`，已 gitignore
-- SQLite 数据库在 `private/huice-data.sqlite`，已 gitignore
-- `export-data.sh` 导出的备份包含凭证，请勿上传到公开位置
-- 扩展不会向任何第三方服务器发送数据
+- 慧经营账号密码只存在你电脑的 `private/huice.env` 文件里，**不会上传到任何服务器**
+- 数据库也在本地 `private/huice-data.sqlite`，**不联网**
+- `export-data.sh` 导出的备份文件含账号密码，**别发给别人、别传网上**
+- 扩展只往拼多多页面注入数据，**不往外发数据**
+
+---
+
+## 净利润怎么算的
+
+```
+净利润 = 慧经营毛利额 - 包装人工成本 - 平台费
+       = 慧经营毛利额 - (1.15元 × 销量) - (销售额 × 2%)
+```
+
+- **包装人工成本**：每单 1.15 元（可以改）
+- **平台费**：销售额的 2%（可以改）
+
+如果想改这两个参数，编辑 `tools/huice-export-cdp.mjs` 里的 `parseXlsx` 函数。
+
+---
+
+## 有问题找我
+
+装的过程中遇到什么问题，截图发我就行。
