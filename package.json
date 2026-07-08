@@ -18,5 +18,8 @@
     "@lancedb/lancedb": "^0.30.0",
     "better-sqlite3": "^12.11.1",
     "playwright": "^1.61.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true
   }
 }

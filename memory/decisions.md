@@ -459,3 +459,30 @@
 3. **优先级3(兜底)**: 第2列(图/商品名通常在1-2位) ← 永不落末尾
 
 **影响文件**: `dts/source/pdd-enhancer.js` injectHuiceColumns L992-1010 + 版本 v16
+
+## [2026-07-08] 慧经营数据采集改用「导出全部」xlsx + 30 天回采建库
+
+**背景**: 接手开发后发现慧经营商品排名页 AG-Grid 只显示 22 条(虚拟滚动 + 分页限制),且列不全(需手动添加净利额/净利率列)。原 `extractHuiceFromDOM` DOM 提取方式数据量不足 + 列被隐藏。
+
+**决策**:
+1. **采集方式改用「导出全部」xlsx** -- 点下载按钮 -> 导出全部 -> 去下载中心下载 xlsx -> openpyxl 解析。每天 637~809 条全量数据,17 列完整
+2. **30 天回采建库** -- `tools/huice-export-cdp.mjs --days 30` 一次性回采 30 天,21688 条入库 SQLite
+3. **日期切换用面板点击** -- element-ui el-date-picker 的 input.value 方式不生效,必须点 `.el-range-editor` 打开面板 -> 翻月 -> 点日期两次(单日范围)
+4. **getHuiceDataByDateRange 读日期范围** -- mms 弹窗选 7 天范围时,读 7 天的 huice 数据按 productId 聚合(多天数值相加)
+
+**理由**:
+- xlsx 导出 637 条 vs DOM 提取 22 条,数据量差 30 倍
+- xlsx 包含全平台 111 店铺 2177 商品,DOM 只有视口内可见行
+- 日期范围聚合:某商品某天无数据不代表整个范围无数据
+
+**影响文件**:
+- `tools/huice-export-cdp.mjs` -- 30 天回采工具(CDP + xlsx 导出 + openpyxl 解析)
+- `tools/write-storage.mjs` -- SQLite -> dts storage 写入
+- `tools/cdp-eval.mjs` / `cdp-click.mjs` / `cdp-wait-toolbox.mjs` -- CDP 工具集
+- `dts/source/pdd-enhancer.js` -- getHuiceDataByDateRange 日期范围聚合
+- `scripts/huice-sync.mjs` -- CDP 复用 + --backfill 参数
+- `private/huice-data.sqlite` -- 30 天 21688 条数据(gitignored)
+
+**验证**: mms 弹窗近7天,4 真列显示真实数据(净利润 276.68 / 净利率 33.43% / 推广费比 13.07% / 保本ROI 4.73)
+
+**撤销条件**: 慧经营关闭「导出全部」功能或改版 xlsx 格式
