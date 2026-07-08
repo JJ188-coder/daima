@@ -365,3 +365,42 @@ left.querySelector('.el-icon-arrow-left:not(.el-icon-d-arrow-left)')
   - **根因**: element-ui date-range-picker 点完 start 后,end 的候选在**左日历**(同月),但代码去**右日历**(content[1],startMonth+1)找 endDay → rightHeader !== endMonth → 翻页 → 越翻越远 → end 永远点不上 → picker 保持 start 的默认值
   - **修复**: `isSingleDay = startStr === endStr` 时,end 直接在**左日历**(content[0])点同一天
   - **教训**: **element-ui date-range-picker 单日范围,end 在左日历点,别去右日历**。点完 start 后面板不会自动切换到"选 end"模式,在同面板点第二次就是 end
+
+---
+
+## [2026-07-08] 接手开发 5 个新坑（v5.0.16 -> v5.0.17 开发过程）
+
+- [2026-07-08] Chrome 149 `--load-extension` 单独用不生效 -> 根因:缺 `--enable-extensions` -> 修复
+  - **现象**: `--load-extension=/path/to/dts` 启动 CDP Chrome,扩展 service worker 不出现,标签页列表无 `chrome-extension://`
+  - **根因**: Chrome 149 安全策略,`--load-extension` 必须配合 `--enable-extensions` 才生效(单用被忽略)
+  - **修复**: 启动参数加 `--enable-extensions --load-extension=...`
+  - **教训**: **Chrome 149+ 加载 unpacked 扩展必须 `--enable-extensions` + `--load-extension` 一起用**
+  - **影响文件**: CDP Chrome 启动方式
+
+- [2026-07-08] 慧经营 input.value 切日期不生效 -> 根因:Vue 组件 state 没更新 -> 修复:用面板点击
+  - **现象**: 改 `.el-range-editor input` 的 value + dispatch input/change event + 点查询,日期 input 显示变了,但查询返回的还是旧日期数据
+  - **根因**: element-ui el-date-picker 的 Vue 组件内部 state 没被 DOM event 更新,查询用的是组件 state 不是 input.value
+  - **修复**: 用面板点击方式 `setDateRangeByPanel()` -- 点 `.el-range-editor` 打开面板 -> 翻月到目标月 -> 点日期 `td.available` **两次**(第一次设开始,第二次设结束) -> 点查询
+  - **教训**: **element-ui el-date-picker 不能用 input.value 切日期,必须走面板点击**。Vue 组件的日期状态在组件 data 里,改 DOM input 不改组件 state
+  - **影响文件**: `tools/huice-export-cdp.mjs` `setDateRangeByPanel()`
+
+- [2026-07-08] 慧经营「导出全部」不是直接下载 -> 根因:异步后台生成,要去下载中心取 -> 修复
+  - **现象**: 点下载按钮 -> 点「导出全部」,页面提示「导出完成」,但 Downloads 目录没新文件
+  - **根因**: 慧经营「导出全部」是**异步后台生成** xlsx,生成完在「下载中心」页面(`#/baseSettings/downloadCenter`)列出,需要手动去点「下载」按钮
+  - **修复**: 导出后导航到下载中心 -> 点 AG-Grid `operation` 列里的 `<button>` 下载 xlsx。注意:点 AG-Grid cell DIV 层不生效,必须点 cell 内的 `<button class="el-button--text el-button--mini">`
+  - **教训**: **慧经营导出是异步的,不是直接下载**。流程:导出全部 -> 等 6s -> 去下载中心 -> 点 operation 列的 button。AG-Grid cell 点击要找 `<button>` 不是 cell DIV
+  - **影响文件**: `tools/huice-export-cdp.mjs`
+
+- [2026-07-08] AG-Grid 虚拟滚动隐藏列 -> 根因:列太多超出视口 -> 修复:用「导出全部」xlsx
+  - **现象**: 慧经营商品排名页加了净利额/净利率/退款等列后,`receivableAmount`/`payQty`/`costAmount` 被虚拟滚动隐藏,extractHuiceFromDOM 读到 null
+  - **根因**: AG-Grid 横向虚拟滚动,只有视口内的列有 DOM,超宽列不渲染
+  - **修复**: 放弃 DOM 提取,改用「导出全部」下载 xlsx(637 条全量数据,17 列完整),用 openpyxl 解析入库
+  - **教训**: **AG-Grid 列多时 DOM 提取不可靠,用「导出全部」xlsx 拿全量数据**。xlsx 637 条 vs DOM 22 条,数据量差 30 倍
+  - **影响文件**: `tools/huice-export-cdp.mjs`(替代 `tools/huice-backfill-cdp.mjs` 的 DOM 提取)
+
+- [2026-07-08] getHuiceDataByDate 只读开始日期 -> 根因:7天范围只读1天 -> 修复:getHuiceDataByDateRange
+  - **现象**: mms 弹窗选近7天(7/1~7/7),4 真列全 null,但 storage 里 `pdd_huice_window_2026-07-01` 有数据
+  - **根因**: pdd-enhancer.js L732 `getHuiceDataByDate(startDate)` 只读开始日期(7/1)一天的 storage。但某商品 7/1 单日可能无数据(下架/无销量),7/2~7/7 有数据。只读 7/1 = 匹配不上
+  - **修复**: 新增 `getHuiceDataByDateRange(startDate, endDate)` -- 读日期范围内所有 `pdd_huice_window_<date>` 的数据,按 productId 聚合(多天数值相加)
+  - **教训**: **日期范围查询要读范围内所有天,不能只读开始日期**。商品某天无数据不代表整个范围无数据
+  - **影响文件**: `dts/source/pdd-enhancer.js` `getHuiceDataByDateRange()`

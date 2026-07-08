@@ -385,55 +385,86 @@ async function setDateRange(page, startStr, endStr) {
 }
 
 async function main() {
-  if (!existsSync(PROFILE_DIR)) {
-    console.log(`❌ 慧经营 profile 不存在: ${PROFILE_DIR}`);
-    console.log('   首次使用需手动登录一次慧经营，cookies 会自动保存到该 profile');
-    process.exit(1);
-  }
+  // 支持 --backfill 等价于 --days 30
+  if (args.includes('--backfill')) days = 30;
 
   if (!existsSync(OUTPUT_DIR)) mkdirSync(OUTPUT_DIR, { recursive: true });
 
   console.log(`🚀 慧经营数据同步开始（${days} 天）`);
-  console.log(`   profile: ${PROFILE_DIR}`);
   console.log(`   目标: 提取 ${dateStr(-1)} ~ ${dateStr(-days)} 的利润数据`);
 
-  // 用 launchPersistentContext 复用 cookies。headless=true 不弹窗、不抢焦点。
-  const context = await chromium.launchPersistentContext(PROFILE_DIR, {
-    headless: true,
-    executablePath: CHROME_PATH,
-    viewport: { width: 1600, height: 900 },
-    locale: 'zh-CN',
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      '--no-sandbox',
-      // headless 反检测：用 new headless mode（与有头一致的 UA/特征）
-      '--disable-gpu',
-    ],
-  });
-  // 抹掉 navigator.webdriver（headless 反检测）
-  await context.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-  }).catch(() => {});
-  const page = context.pages()[0] || await context.newPage();
+  // ── 优先 CDP 复用已登录的 Chrome（不启动新 Chrome，不抢焦点）──
+  let browser = null;
+  let page = null;
+  let usingCdp = false;
 
-  console.log('🌐 打开慧经营商品排名页...');
-  await page.goto(CONFIG.targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-  await page.waitForTimeout(4000);
+  const cdpOnline = await checkCdp(CONFIG.cdpPort);
+  if (cdpOnline) {
+    console.log(`🔌 CDP 9222 在线，尝试复用已登录的 Chrome...`);
+    try {
+      browser = await chromium.connectOverCDP(`http://127.0.0.1:${CONFIG.cdpPort}`);
+      // 找已打开的 hjy.huice.com 标签页
+      const contexts = browser.contexts();
+      let hjyPage = null;
+      for (const ctx of contexts) {
+        for (const p of ctx.pages()) {
+          if (p.url().includes('hjy.huice.com')) { hjyPage = p; break; }
+        }
+        if (hjyPage) break;
+      }
+      if (hjyPage) {
+        page = hjyPage;
+        usingCdp = true;
+        console.log(`✅ 复用已登录的慧经营标签页: ${page.url().slice(0, 60)}`);
+        // 确保在 CommodityAnalysis 页
+        if (!page.url().includes('CommodityAnalysis')) {
+          await page.evaluate(() => { location.hash = '#/opertData/CommodityAnalysis'; });
+          await page.waitForTimeout(3000);
+        }
+      } else {
+        console.log(`⚠️ CDP 在线但没有 hjy.huice.com 标签页，fallback 到 launchPersistentContext`);
+        await browser.close();
+        browser = null;
+      }
+    } catch (e) {
+      console.log(`⚠️ CDP 连接失败: ${e.message}，fallback 到 launchPersistentContext`);
+      browser = null;
+    }
+  }
 
-  // 检查是否已登录（看是否跳到登录页）
-  const currentUrl = page.url();
-  const needLogin = /login|signin/i.test(currentUrl) || await page.locator('input[type="password"]').isVisible({ timeout: 2000 }).catch(() => false);
-
-  if (needLogin) {
-    console.log('⚠️ cookies 已过期或未登录，请在打开的浏览器手动登录慧经营');
-    console.log('   登录完成后会自动继续...');
-    // 等待用户登录完成（最多 3 分钟）
-    await page.waitForURL('**/opertData/**', { timeout: 180000 }).catch(async () => {
-      // 登录后手动导航
-      await page.goto(CONFIG.targetUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
+  // ── Fallback: launchPersistentContext（headless，需要 private/huice-profile 已登录）──
+  if (!browser) {
+    if (!existsSync(PROFILE_DIR)) {
+      console.log(`❌ 慧经营 profile 不存在: ${PROFILE_DIR}`);
+      console.log('   首次使用需手动登录一次慧经营，cookies 会自动保存到该 profile');
+      console.log('   或在 CDP Chrome（9222 端口）打开 hjy.huice.com 并登录后重试');
+      process.exit(1);
+    }
+    console.log(`🌐 启动 headless Chrome（profile: ${PROFILE_DIR}）...`);
+    browser = await chromium.launchPersistentContext(PROFILE_DIR, {
+      headless: true,
+      executablePath: CHROME_PATH,
+      viewport: { width: 1600, height: 900 },
+      locale: 'zh-CN',
+      args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-gpu'],
     });
-    await page.waitForTimeout(3000);
-  } else {
+    await browser.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    }).catch(() => {});
+    page = browser.pages()[0] || await browser.newPage();
+
+    console.log('🌐 打开慧经营商品排名页...');
+    await page.goto(CONFIG.targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(4000);
+
+    const currentUrl = page.url();
+    const needLogin = /login|signin/i.test(currentUrl) || await page.locator('input[type="password"]').isVisible({ timeout: 2000 }).catch(() => false);
+    if (needLogin) {
+      console.log('⚠️ cookies 已过期或未登录，请在 CDP Chrome 登录慧经营后重试');
+      console.log('   或用 --headed 参数手动登录');
+      await browser.close();
+      process.exit(1);
+    }
     console.log('✅ 已登录（cookies 有效）');
   }
 
@@ -443,26 +474,42 @@ async function main() {
     const targetDate = dateStr(-offset);
     console.log(`\n📅 [${offset}/${days}] 采集 ${targetDate}...`);
 
-    // 切日期到 targetDate（单日范围）。element-ui range input 是 readonly，
-    // 必须走面板点击（setDateRange），fill 会超时。
-    const hasRangePicker = await page.locator('.el-range-editor').first().isVisible({ timeout: 2000 }).catch(() => false);
-    if (hasRangePicker) {
-      await setDateRange(page, targetDate, targetDate).catch(e => console.log(`  ⚠ setDateRange 失败: ${e.message}`));
-      // 点查询
-      const searchBtn = page.locator('button:has-text("查询"), button:has-text("搜索")').first();
-      if (await searchBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
-        await searchBtn.click();
-      }
-      await page.waitForTimeout(2500);
-    } else if (offset === 1) {
-      console.log(`  ℹ 未找到 range picker，使用页面当前默认日期`);
+    // 切日期到 targetDate（单日范围）
+    // 用 input.value 方式（比 setDateRange 面板点击快且稳）
+    const setDateResult = await page.evaluate((dateStr) => {
+      const inputs = [...document.querySelectorAll('input')];
+      const startInput = inputs.find(i => i.placeholder === '开始日期' || i.placeholder.includes('开始'));
+      const endInput = inputs.find(i => i.placeholder === '结束日期' || i.placeholder.includes('结束'));
+      if (!startInput || !endInput) return { ok: false, error: 'no date inputs' };
+
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(startInput, dateStr);
+      startInput.dispatchEvent(new Event('input', { bubbles: true }));
+      startInput.dispatchEvent(new Event('change', { bubbles: true }));
+      setter.call(endInput, dateStr);
+      endInput.dispatchEvent(new Event('input', { bubbles: true }));
+      endInput.dispatchEvent(new Event('change', { bubbles: true }));
+
+      // 点查询按钮
+      const btn = [...document.querySelectorAll('button, .el-button')].find(b =>
+        (b.innerText || '').trim() === '查询' || (b.innerText || '').trim() === '搜索'
+      );
+      if (btn) btn.click();
+      return { ok: true, start: startInput.value, end: endInput.value, queried: !!btn };
+    }, targetDate);
+
+    if (!setDateResult.ok) {
+      console.log(`  ⚠ 切日期失败: ${setDateResult.error}`);
+      continue;
     }
+    // 等待数据加载
+    await page.waitForTimeout(3000);
 
     // 提取表格
     const records = await page.evaluate(extractHuiceFromDOM, targetDate);
     if (records.length > 0) {
       allRecords.push(...records);
-      console.log(`  ✅ ${records.length} 条记录`);
+      console.log(`  ✅ ${records.length} 条记录 (netProfit 有值: ${records.filter(r => r.netProfit != null).length})`);
       // 落盘备份
       writeFileSync(path.join(OUTPUT_DIR, `${targetDate.replace(/-/g, '')}.json`), JSON.stringify({ date: targetDate, records }, null, 2));
     } else {
@@ -475,7 +522,12 @@ async function main() {
   writeFileSync(summaryFile, JSON.stringify(allRecords, null, 2));
   console.log(`\n💾 数据落盘: ${summaryFile} (${allRecords.length} 条)`);
 
-  await context.close();
+  // CDP 模式只断开连接，不关 Chrome；launchPersistentContext 模式才 close
+  if (usingCdp) {
+    try { await browser.close(); } catch {}  // connectOverCDP 的 close 只是断开
+  } else {
+    await browser.close();
+  }
 
   // 入库 SQLite(商品级归档,双写架构:SQLite 归档 + storage 注入报表)
   let sqliteInserted = 0;

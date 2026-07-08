@@ -727,10 +727,13 @@ async function getPromoDataByWindow(window) {
         const vueResult = applyPromoToVueDialog(promoMap);
 
     // === 慧经营利润数据行内展示 ===
-    // 无论有无数据都执行：有数据 → 绿色信息条；无数据 → 灰色「慧经营未导入」提示
+    // 无论有无数据都执行：有数据 -> 绿色信息条；无数据 -> 灰色「慧经营未导入」提示
     if (dialogWindow) {
-      const startDate = dialogWindow.split('~')[0];
-      const huiceRecords = await getHuiceDataByDate(startDate);
+      const dateParts = dialogWindow.split('~');
+      const startDate = dateParts[0];
+      const endDate = dateParts[1] || dateParts[0];  // 单日范围只有 startDate
+      // 读日期范围内所有天的 huice 数据,按 productId 聚合(多天数据相加)
+      const huiceRecords = await getHuiceDataByDateRange(startDate, endDate);
       const huiceMap = {};
       huiceRecords.forEach(r => { if (r.productId) huiceMap[r.productId] = r; });
       // 从 renderData 读取行数据（复用 applyPromoToVueDialog 已定位的逻辑）
@@ -800,6 +803,56 @@ async function getPromoDataByWindow(window) {
     const d = await swCall('GetLocalData', { key: [key] });
     const v = d?.[key];
     return v?.records || [];
+  }
+
+  /** 读日期范围内所有天的 huice 数据,按 productId 聚合(多天数值相加) */
+  async function getHuiceDataByDateRange(startDate, endDate) {
+    if (!startDate) return [];
+    const start = new Date(startDate);
+    const end = new Date(endDate || startDate);
+    if (isNaN(start) || isNaN(end)) return [];
+
+    // 收集范围内所有日期 key
+    const keys = [];
+    const cur = new Date(start);
+    while (cur <= end) {
+      const y = cur.getFullYear();
+      const m = String(cur.getMonth() + 1).padStart(2, '0');
+      const d = String(cur.getDate()).padStart(2, '0');
+      keys.push('pdd_huice_window_' + y + '-' + m + '-' + d);
+      cur.setDate(cur.getDate() + 1);
+    }
+
+    // 一次性读所有 key
+    const d = await swCall('GetLocalData', { key: keys });
+    if (!d) return [];
+
+    // 按 productId 聚合:多天数据数值相加
+    const byProduct = {};
+    for (const k of keys) {
+      const v = d[k];
+      if (!v) continue;
+      const records = v.records || v;
+      if (!Array.isArray(records)) continue;
+      for (const r of records) {
+        if (!r.productId) continue;
+        if (!byProduct[r.productId]) {
+          byProduct[r.productId] = { ...r };
+        } else {
+          // 数值字段相加
+          const existing = byProduct[r.productId];
+          for (const field of ['salesAmount', 'salesQuantity', 'costPrice', 'refundAmount', 'netProfit']) {
+            const a = Number(existing[field]) || 0;
+            const b = Number(r[field]) || 0;
+            existing[field] = (a || b) ? a + b : null;
+          }
+          // 净利率:用最后一天有值的(或按销售额加权)
+          if (r.netProfitRate != null) existing.netProfitRate = r.netProfitRate;
+          if (r.refundRate != null) existing.refundRate = r.refundRate;
+        }
+      }
+    }
+    return Object.values(byProduct);
   }
 
   /** 慧经营页面：从表格提取商品级数据
