@@ -190,19 +190,48 @@ cat > "$DAILY_PLIST" << EOF
 </plist>
 EOF
 
+# huice-server: 开机启动 HTTP 数据服务
+SERVER_PLIST="$LAUNCH_DIR/com.daima.huice-server.plist"
+cat > "$SERVER_PLIST" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.daima.huice-server</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$SCRIPT_DIR/scripts/start-huice-server.sh</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/huice-server-launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/huice-server-launchd.log</string>
+</dict>
+</plist>
+EOF
+
 # 卸载旧的(如果有)再加载
 launchctl unload "$CDP_PLIST" 2>/dev/null || true
 launchctl unload "$DAILY_PLIST" 2>/dev/null || true
+launchctl unload "$SERVER_PLIST" 2>/dev/null || true
 launchctl load -w "$CDP_PLIST"
 launchctl load -w "$DAILY_PLIST"
+launchctl load -w "$SERVER_PLIST"
 
 echo -e "  ${GREEN}✅ LaunchAgent 已加载:${NC}"
-echo -e "     - com.daima.cdp-chrome (开机自启动 Chrome)"
+echo -e "     - com.daima.cdp-chrome  (开机自启动 Chrome)"
 echo -e "     - com.daima.huice-daily (每天 09:00 采集)"
+echo -e "     - com.daima.huice-server(开机启动 HTTP 数据服务)"
 echo ""
 
-# === 6. 启动 CDP Chrome ===
-echo -e "${YELLOW}[6/6] 启动 CDP Chrome...${NC}"
+# === 6. 启动 HTTP 服务 + CDP Chrome ===
+echo -e "${YELLOW}[6/6] 启动 HTTP 服务 + CDP Chrome...${NC}"
+bash scripts/start-huice-server.sh 2>/dev/null || true
 bash scripts/start-cdp-chrome.sh 2>/dev/null || true
 echo ""
 
@@ -232,5 +261,6 @@ echo ""
 echo -e "${YELLOW}定时任务:${NC}"
 echo -e "  - 每天 09:00 自动采集前一天数据"
 echo -e "  - 开机自动启动 CDP Chrome"
-echo -e "  - 日志: /tmp/huice-daily.log"
+echo -e "  - 开机自动启动 HTTP 数据服务 (日常 Chrome 也能看数据)"
+echo -e "  - 日志: /tmp/huice-daily.log, /tmp/huice-server.log"
 echo ""

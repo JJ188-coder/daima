@@ -126,6 +126,7 @@ Write-Host "[5/6] 配置定时任务 (Windows 计划任务)..." -ForegroundColor
 # 先删除旧任务(如果有)
 schtasks /Delete /TN "Daima_CDP_Chrome" /F 2>$null | Out-Null
 schtasks /Delete /TN "Daima_Huice_Daily" /F 2>$null | Out-Null
+schtasks /Delete /TN "Daima_Huice_Server" /F 2>$null | Out-Null
 
 # CDP Chrome: 登录时启动
 $cdpScript = "$SCRIPT_DIR\scripts\start-cdp-chrome.ps1"
@@ -135,13 +136,18 @@ schtasks /Create /TN "Daima_CDP_Chrome" /TR "powershell -ExecutionPolicy Bypass 
 $dailyScript = "$SCRIPT_DIR\scripts\huice-daily.ps1"
 schtasks /Create /TN "Daima_Huice_Daily" /TR "powershell -ExecutionPolicy Bypass -File `"$dailyScript`"" /SC DAILY /ST 09:00 /F 2>&1 | Out-Null
 
+# Huice Server: 登录时启动 HTTP 数据服务
+schtasks /Create /TN "Daima_Huice_Server" /TR "powershell -ExecutionPolicy Bypass -Command `"Start-Process node -ArgumentList '`$SCRIPT_DIR\tools\huice-server.mjs' -WindowStyle Hidden`"" /SC ONLOGON /RL HIGHEST /F 2>&1 | Out-Null
+
 Write-Host "  ✅ Windows 计划任务已创建:" -ForegroundColor Green
-Write-Host "     - Daima_CDP_Chrome (登录时启动 Chrome)"
+Write-Host "     - Daima_CDP_Chrome  (登录时启动 Chrome)"
 Write-Host "     - Daima_Huice_Daily (每天 09:00 采集)"
+Write-Host "     - Daima_Huice_Server(登录时启动 HTTP 数据服务)"
 Write-Host ""
 
-# === 6. 启动 CDP Chrome ===
-Write-Host "[6/6] 启动 CDP Chrome..." -ForegroundColor Yellow
+# === 6. 启动 HTTP 服务 + CDP Chrome ===
+Write-Host "[6/6] 启动 HTTP 服务 + CDP Chrome..." -ForegroundColor Yellow
+Start-Process node -ArgumentList "$SCRIPT_DIR\tools\huice-server.mjs" -WindowStyle Hidden 2>$null
 & powershell -ExecutionPolicy Bypass -File $cdpScript 2>$null
 Write-Host ""
 

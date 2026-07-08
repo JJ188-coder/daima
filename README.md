@@ -110,6 +110,7 @@ node tools/write-storage.mjs --days 1        # 写进扩展
 
 - 每天早上 **9 点**自动采集昨天的数据
 - 开机自动启动 Chrome
+- 开机自动启动 HTTP 数据服务（日常 Chrome 也能看数据）
 - 你只需要保证 Chrome 里慧经营标签页是登录状态
 
 ### 手动操作
