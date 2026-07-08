@@ -70,63 +70,86 @@ async function setDateRangeByPanel(ws, targetDate) {
   })()`);
   await sleep(1500);
 
-  // 2. 翻左面板到目标月
-  for (let attempt = 0; attempt < 24; attempt++) {
-    const header = await cdpEval(ws, `(() => {
-      const panels = document.querySelectorAll('.el-date-range-picker__content');
-      return panels[0]?.querySelector('.el-date-range-picker__header')?.textContent?.trim() || '';
-    })()`);
-    if (header === targetMonthHeader) break;
+  // 2. 找目标月面板（如果不存在,往前翻月让它出现）
+  const targetHeader = `${year} 年 ${month} 月`;
 
-    // 点单箭头翻月（往前往后）
-    const direction = await cdpEval(ws, `(() => {
+  // 最多翻 12 次（覆盖一年）
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const found = await cdpEval(ws, `(() => {
       const panels = document.querySelectorAll('.el-date-range-picker__content');
-      const left = panels[0];
-      if (!left) return 'no panel';
-      const curHeader = left.querySelector('.el-date-range-picker__header')?.textContent?.trim() || '';
-      // 比较年月
-      const curMatch = curHeader.match(/(\\d{4}) 年 (\\d{1,2}) 月/);
-      const targetMatch = '${targetMonthHeader}'.match(/(\\d{4}) 年 (\\d{1,2}) 月/);
-      if (!curMatch || !targetMatch) return 'no match';
-      const curVal = parseInt(curMatch[1]) * 12 + parseInt(curMatch[2]);
-      const targetVal = parseInt(targetMatch[1]) * 12 + parseInt(targetMatch[2]);
-      if (curVal > targetVal) {
-        // 往前翻: 点单箭头 .el-icon-arrow-left（不是双箭头 d-arrow-left）
-        const btn = left.querySelector('.el-icon-arrow-left');
-        if (btn) { (btn.closest('button') || btn).click(); return 'prev'; }
-      } else {
-        // 往后翻: 点单箭头 .el-icon-arrow-right
-        const btn = left.querySelector('.el-icon-arrow-right');
-        if (btn) { (btn.closest('button') || btn).click(); return 'next'; }
+      for (const p of panels) {
+        const h = p.querySelector('.el-date-range-picker__header')?.textContent?.trim() || '';
+        if (h === '${targetHeader}') return 'found';
       }
-      return 'stuck';
+      return 'not found';
+    })()`);
+    if (found === 'found') break;
+
+    // 往前翻一个月:点第一个面板的单箭头
+    await cdpEval(ws, `(() => {
+      const panels = document.querySelectorAll('.el-date-range-picker__content');
+      const first = panels[0];
+      if (!first) return 'no panel';
+      // 单箭头 .el-icon-arrow-left（不是双箭头 d-arrow-left）
+      const btn = first.querySelector('.el-icon-arrow-left');
+      if (btn) { (btn.closest('button') || btn).click(); return 'prev'; }
+      return 'no arrow';
     })()`);
     await sleep(600);
-    if (direction === 'stuck' || direction === 'no match') break;
   }
 
-  // 3. 点日期两次（第一次设开始,第二次设结束）
+  // 3. 在目标月的面板里点日期两次（第一次设开始,第二次设结束）
+  //    如果面板有残留选择,先点别的日期清掉
   await cdpEval(ws, `(() => {
     const panels = document.querySelectorAll('.el-date-range-picker__content');
-    const leftPanel = panels[0];
-    if (!leftPanel) return 'no left panel';
-    const dayCell = [...leftPanel.querySelectorAll('td.available')].find(td =>
-      td.textContent.trim() === '${day}'
+    let targetPanel = null;
+    for (const p of panels) {
+      const h = p.querySelector('.el-date-range-picker__header')?.textContent?.trim() || '';
+      if (h === '${targetHeader}') { targetPanel = p; break; }
+    }
+    if (!targetPanel) return 'no target panel';
+
+    // 找目标日期(干净的,未被选中的)
+    let dayCell = [...targetPanel.querySelectorAll('td.available')].find(td =>
+      td.textContent.trim() === '${day}' &&
+      !td.classList.contains('start-date') &&
+      !td.classList.contains('end-date') &&
+      !td.classList.contains('in-range')
     );
+
+    // 如果目标日期已被选中(在 in-range/start-date/end-date 状态),先点别的日期清掉
+    if (!dayCell) {
+      const otherCell = [...targetPanel.querySelectorAll('td.available')].find(td =>
+        td.textContent.trim() !== '${day}'
+      );
+      if (otherCell) {
+        otherCell.click();  // 点别的日期清旧选择
+      }
+      // 重新找目标日期(此时应该是干净的)
+      dayCell = [...targetPanel.querySelectorAll('td.available')].find(td =>
+        td.textContent.trim() === '${day}'
+      );
+    }
+
     if (!dayCell) return 'no day ${day}';
     dayCell.click();  // 第一次:设开始日期
     return 'first click';
   })()`);
-  await sleep(800);
+  await sleep(1000);
 
+  // 第二次点同一个日期(设结束 = 开始 = 单日范围)
   await cdpEval(ws, `(() => {
     const panels = document.querySelectorAll('.el-date-range-picker__content');
-    const leftPanel = panels[0];
-    if (!leftPanel) return 'no left panel';
-    const dayCell = [...leftPanel.querySelectorAll('td.available')].find(td =>
+    let targetPanel = null;
+    for (const p of panels) {
+      const h = p.querySelector('.el-date-range-picker__header')?.textContent?.trim() || '';
+      if (h === '${targetHeader}') { targetPanel = p; break; }
+    }
+    if (!targetPanel) return 'no target panel';
+    const dayCell = [...targetPanel.querySelectorAll('td.available')].find(td =>
       td.textContent.trim() === '${day}'
     );
-    if (!dayCell) return 'no day ${day}';
+    if (!dayCell) return 'no day';
     dayCell.click();  // 第二次:设结束日期
     return 'second click';
   })()`);
@@ -196,17 +219,32 @@ for row in rows[11:]:
     def pp(v):
         n = pn(v)
         return n/100 if n is not None else None
+    # 慧经营原始净利额
+    raw_net_profit = pn(row[15])
+    raw_net_profit_rate = pp(row[16])
+    sales_amt = pn(row[5])
+    sales_qty = pn(row[7])
+    # 真实净利润 = 慧经营净利额 - 1.15×销量(件数,作为单数) - 销售额×2%
+    packing_cost = 1.15 * sales_qty if sales_qty is not None else 0
+    platform_fee = sales_amt * 0.02 if sales_amt is not None else 0
+    real_net_profit = None
+    if raw_net_profit is not None:
+        real_net_profit = raw_net_profit - packing_cost - platform_fee
+    # 真实净利率 = 真实净利润 / 销售额
+    real_net_profit_rate = None
+    if real_net_profit is not None and sales_amt and sales_amt > 0:
+        real_net_profit_rate = real_net_profit / sales_amt
     records.append({
         'productId': product_id,
         'productName': str(row[1] or '').strip(),
         'shopName': str(row[0] or '').strip(),
-        'salesAmount': pn(row[5]),
-        'salesQuantity': pn(row[7]),
+        'salesAmount': sales_amt,
+        'salesQuantity': sales_qty,
         'costPrice': pn(row[8]),
         'refundAmount': pn(row[13]),
         'refundRate': pp(row[14]),
-        'netProfit': pn(row[15]),
-        'netProfitRate': pp(row[16]),
+        'netProfit': real_net_profit,
+        'netProfitRate': real_net_profit_rate,
         'date': '${targetDate}',
         'source': 'huice-export'
     })
@@ -243,6 +281,12 @@ async function main() {
   for (let offset = 1; offset <= days; offset++) {
     const targetDate = dateStr(-offset);
     console.log(`\n📅 [${offset}/${days}] 采集 ${targetDate}...`);
+
+    // 0. 每天先刷新页面,清除日期选择器的残留 Vue 状态
+    if (offset > 1) {
+      await cdpEval(ws, 'location.reload()');
+      await sleep(5000);
+    }
 
     // 1. 切日期（面板点击方式）
     const dateResult = await setDateRangeByPanel(ws, targetDate);
