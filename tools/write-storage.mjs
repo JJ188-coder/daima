@@ -21,10 +21,32 @@ function dateStr(offset = 0) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function main() {
+  // 0. 检查 CDP Chrome 是否在线,不在线则重试 3 次
+  let cdpOnline = false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const r = await fetch('http://127.0.0.1:9222/json/version', { signal: AbortSignal.timeout(3000) });
+      if (r.ok) { cdpOnline = true; break; }
+    } catch {}
+    if (attempt < 3) {
+      console.error(`⚠️ CDP Chrome 不在线,${attempt}/3,10 秒后重试...`);
+      await sleep(10000);
+    }
+  }
+  if (!cdpOnline) {
+    console.error('❌ CDP Chrome 9222 不在线,数据保留在 SQLite,下次运行时会写入');
+    console.error('   请启动 CDP Chrome: /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --user-data-dir=~/.chrome-cdp-profile --remote-debugging-port=9222 --enable-extensions --load-extension=~/Documents/daima/dts');
+    process.exit(1);
+  }
+
   // 1. 找 dts 扩展 SW
   const tabs = await (await fetch('http://127.0.0.1:9222/json/list')).json();
   const swTab = tabs.find(t => t.type === 'service_worker' && t.url.includes('chrome-extension'));
-  if (!swTab) { console.error('❌ 没找到 dts 扩展 SW'); process.exit(1); }
+  if (!swTab) {
+    console.error('❌ 没找到 dts 扩展 SW（扩展可能未加载）');
+    console.error('   数据保留在 SQLite,下次运行时会写入');
+    process.exit(1);
+  }
 
   const ws = new WebSocket(swTab.webSocketDebuggerUrl);
   await new Promise((r, rej) => { ws.addEventListener('open', r, { once: true }); ws.addEventListener('error', rej, { once: true }); setTimeout(rej, 5000); });

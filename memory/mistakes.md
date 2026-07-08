@@ -404,3 +404,10 @@ left.querySelector('.el-icon-arrow-left:not(.el-icon-d-arrow-left)')
   - **修复**: 新增 `getHuiceDataByDateRange(startDate, endDate)` -- 读日期范围内所有 `pdd_huice_window_<date>` 的数据,按 productId 聚合(多天数值相加)
   - **教训**: **日期范围查询要读范围内所有天,不能只读开始日期**。商品某天无数据不代表整个范围无数据
   - **影响文件**: `dts/source/pdd-enhancer.js` `getHuiceDataByDateRange()`
+
+- [2026-07-08] 日期面板残留 Vue 状态导致选择错误 -> 根因:切换日期后面板残留上次选择 -> 修复:每天循环重载页面
+  - **现象**: 30 天回采第 2 天开始,日期切换后面板仍显示上一天的选中状态,导致点日期点到错的单元格
+  - **根因**: element-ui el-date-range-picker 面板是 Vue 管理的 DOM,切换日期后面板状态不清空,残留的 `start-date`/`end-date`/`in-range` class 影响下次选择
+  - **修复**: 每天循环开始时 `location.reload()` 重载页面,清除所有 Vue 组件状态。同时 `setDateRangeByPanel` 里加「先点别的日期清旧选择」逻辑
+  - **教训**: **element-ui 日期面板有残留状态,跨日期切换要重载页面**。Vue 组件状态不会因 DOM 操作自动清空
+  - **影响文件**: `tools/huice-export-cdp.mjs` main 循环 + `setDateRangeByPanel()`
