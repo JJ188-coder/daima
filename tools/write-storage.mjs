@@ -39,12 +39,44 @@ async function main() {
     process.exit(1);
   }
 
-  // 1. 找 dts 扩展 SW
-  const tabs = await (await fetch('http://127.0.0.1:9222/json/list')).json();
-  const swTab = tabs.find(t => t.type === 'service_worker' && t.url.includes('chrome-extension'));
+  // 1. 找 dts 扩展 SW (MV3 SW 会休眠,刷新页面触发唤醒)
+  async function findSw() {
+    const tabs = await (await fetch('http://127.0.0.1:9222/json/list')).json();
+    return tabs.find(t => t.type === 'service_worker' && t.url.includes('chrome-extension'));
+  }
+
+  let swTab = await findSw();
+
+  if (!swTab) {
+    // SW 休眠了,刷新一个已加载扩展的页面触发 SW 重新注册
+    console.log('⚠️ 扩展 SW 不在线,刷新页面触发唤醒...');
+    const tabs = await (await fetch('http://127.0.0.1:9222/json/list')).json();
+    const pageTab = tabs.find(t => t.type === 'page' && (t.url.includes('pinduoduo') || t.url.includes('huice') || t.url.includes('chrome://')));
+    if (pageTab) {
+      try {
+        const pageWs = new WebSocket(pageTab.webSocketDebuggerUrl);
+        await new Promise((r, rej) => { pageWs.addEventListener('open', r, { once: true }); pageWs.addEventListener('error', rej, { once: true }); setTimeout(rej, 3000); });
+        pageWs.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression: 'location.reload()', returnByValue: true } }));
+        await sleep(500);
+        pageWs.close();
+      } catch {}
+    }
+
+    // 轮询等 SW 重新出现 (最多 10 次 x 1 秒)
+    for (let i = 0; i < 10; i++) {
+      await sleep(1000);
+      swTab = await findSw();
+      if (swTab) {
+        console.log('✅ SW 已唤醒');
+        break;
+      }
+    }
+  }
+
   if (!swTab) {
     console.error('❌ 没找到 dts 扩展 SW（扩展可能未加载）');
     console.error('   数据保留在 SQLite,下次运行时会写入');
+    console.error('   请检查 CDP Chrome 是否加载了 dts 扩展');
     process.exit(1);
   }
 
