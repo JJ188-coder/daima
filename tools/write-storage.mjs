@@ -5,6 +5,7 @@
  * 用法: node tools/write-storage.mjs [--days 7]
  */
 import { getProductProfitByDate } from '../scripts/huice/lib/db.mjs';
+import { DEFAULT_WAKEUP_URL, selectWakeupPageTabs } from '../scripts/huice/lib/sw-wakeup.mjs';
 
 const args = process.argv.slice(2);
 let days = 30;
@@ -19,6 +20,82 @@ function dateStr(offset = 0) {
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function fetchJson(url, options = {}) {
+  const res = await fetch(url, options);
+  if (!res.ok) throw new Error(`CDP request failed: ${res.status}`);
+  return res.json();
+}
+
+async function cdpCommand(wsUrl, method, params = {}, timeoutMs = 5000) {
+  const ws = new WebSocket(wsUrl);
+  await new Promise((resolve, reject) => {
+    ws.addEventListener('open', resolve, { once: true });
+    ws.addEventListener('error', reject, { once: true });
+    setTimeout(() => reject(new Error('CDP websocket open timeout')), timeoutMs);
+  });
+
+  try {
+    return await new Promise((resolve, reject) => {
+      const id = 1;
+      const timer = setTimeout(() => reject(new Error('CDP command timeout')), timeoutMs);
+      const handler = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.id !== id) return;
+        clearTimeout(timer);
+        ws.removeEventListener('message', handler);
+        if (msg.error) reject(new Error(msg.error.message || 'CDP command failed'));
+        else resolve(msg.result);
+      };
+      ws.addEventListener('message', handler);
+      ws.send(JSON.stringify({ id, method, params }));
+    });
+  } finally {
+    ws.close();
+  }
+}
+
+async function findSw() {
+  const tabs = await fetchJson('http://127.0.0.1:9222/json/list');
+  return tabs.find(t => t.type === 'service_worker' && t.url.includes('chrome-extension'));
+}
+
+async function openTemporaryWakeupPage() {
+  const target = await fetchJson(`http://127.0.0.1:9222/json/new?${encodeURIComponent(DEFAULT_WAKEUP_URL)}`, { method: 'PUT' });
+  if (!target?.webSocketDebuggerUrl) return null;
+  try {
+    await cdpCommand(target.webSocketDebuggerUrl, 'Page.enable');
+    await sleep(1500);
+  } catch {}
+  return target;
+}
+
+async function closeTemporaryWakeupPage(target) {
+  if (!target?.id) return;
+  try {
+    await fetch(`http://127.0.0.1:9222/json/close/${encodeURIComponent(target.id)}`);
+  } catch {}
+}
+
+async function wakeSwWithoutReloadingUserPages() {
+  const tabs = await fetchJson('http://127.0.0.1:9222/json/list');
+  const businessTabs = selectWakeupPageTabs(tabs);
+  if (businessTabs.length > 0) {
+    console.log(`ℹ️ 检测到 ${businessTabs.length} 个业务页面,不刷新用户页面,改用临时页面唤醒 SW`);
+  }
+
+  const tempTarget = await openTemporaryWakeupPage();
+  try {
+    for (let i = 0; i < 10; i++) {
+      await sleep(1000);
+      const swTab = await findSw();
+      if (swTab) return swTab;
+    }
+    return null;
+  } finally {
+    await closeTemporaryWakeupPage(tempTarget);
+  }
+}
 
 async function main() {
   // 0. 检查 CDP Chrome 是否在线,不在线则重试 3 次
@@ -39,37 +116,13 @@ async function main() {
     process.exit(1);
   }
 
-  // 1. 找 dts 扩展 SW (MV3 SW 会休眠,刷新页面触发唤醒)
-  async function findSw() {
-    const tabs = await (await fetch('http://127.0.0.1:9222/json/list')).json();
-    return tabs.find(t => t.type === 'service_worker' && t.url.includes('chrome-extension'));
-  }
-
   let swTab = await findSw();
 
   if (!swTab) {
-    // SW 休眠了,刷新一个已加载扩展的页面触发 SW 重新注册
-    console.log('⚠️ 扩展 SW 不在线,刷新页面触发唤醒...');
-    const tabs = await (await fetch('http://127.0.0.1:9222/json/list')).json();
-    const pageTab = tabs.find(t => t.type === 'page' && (t.url.includes('pinduoduo') || t.url.includes('huice') || t.url.includes('chrome://')));
-    if (pageTab) {
-      try {
-        const pageWs = new WebSocket(pageTab.webSocketDebuggerUrl);
-        await new Promise((r, rej) => { pageWs.addEventListener('open', r, { once: true }); pageWs.addEventListener('error', rej, { once: true }); setTimeout(rej, 3000); });
-        pageWs.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression: 'location.reload()', returnByValue: true } }));
-        await sleep(500);
-        pageWs.close();
-      } catch {}
-    }
-
-    // 轮询等 SW 重新出现 (最多 10 次 x 1 秒)
-    for (let i = 0; i < 10; i++) {
-      await sleep(1000);
-      swTab = await findSw();
-      if (swTab) {
-        console.log('✅ SW 已唤醒');
-        break;
-      }
+    console.log('⚠️ 扩展 SW 不在线,打开临时页面触发唤醒...');
+    swTab = await wakeSwWithoutReloadingUserPages();
+    if (swTab) {
+      console.log('✅ SW 已唤醒');
     }
   }
 
