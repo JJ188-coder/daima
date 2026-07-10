@@ -121,7 +121,7 @@ export function parseShopExportRows(rows, date) {
   // 找表头行: 第一行可能是标题信息,真正的表头是含"店铺名称"的行
   let headerIdx = 0;
   for (let i = 0; i < Math.min(5, rows.length); i++) {
-    if (rows[i].some(c => String(c).includes('店铺名称'))) {
+    if (rows[i].some(c => String(c).trim() === '店铺名称')) {
       headerIdx = i;
       break;
     }
