@@ -552,8 +552,10 @@ async function main() {
         continue;
       }
 
-      // 4. 选所有拼多多店铺
-      await selectAllPddShops(ws);
+      // 4. 选所有拼多多店铺(只有第一次需要,后续切日期+查询就行)
+      if (i === 0) {
+        await selectAllPddShops(ws);
+      }
 
       // 5. 点查询
       await clickQuery(ws);
