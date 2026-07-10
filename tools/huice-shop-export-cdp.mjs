@@ -411,9 +411,10 @@ function parseXlsxRaw(xlsxPath) {
 function insertRecords(records) {
   let count = 0;
   for (const record of records) {
-    const shopId = upsertShop(record.shopName);
+    const shop = upsertShop(record.shopName);
+    if (!shop || !shop.shop_id) continue;
     upsertShopDailyProfit({
-      shopId,
+      shopId: shop.shop_id,
       date: record.date,
       salesAmount: record.salesAmount,
       promoSpend: record.promoSpend,

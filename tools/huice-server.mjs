@@ -168,7 +168,8 @@ async function handler(req, res) {
       }
 
       // 用 pddShopName 匹配慧经营店铺
-      // 拼多多店铺名"昀诺零食专营店" -> 慧经营店铺名"拼【昀诺"或"拼【昀诺食品"
+      // 拼多多店铺名"昀诺零食专营店" -> 慧经营店铺名"拼【昀诺食品"
+      // 拼多多店铺名"贝鲜速食品专营店" -> 慧经营店铺名"拼【贝鲜食品"
       const Database = (await import('better-sqlite3')).default;
       const dbPath = getDbPath();
       if (!existsSync(dbPath)) {
@@ -177,16 +178,18 @@ async function handler(req, res) {
       }
       const db = new Database(dbPath, { readonly: true });
 
-      // 从 shop_daily_profit 表里找匹配的店铺
-      // 策略: 1.精确匹配 pddShopName 2.模糊匹配 3.返回所有有数据的店铺
       let shopRow = null;
       if (pddShopName) {
-        // 从拼多多店铺名提取关键词: "昀诺零食专营店" -> "昀诺"
-        const keywords = pddShopName.replace(/(食品|零食|专营|旗舰|专卖|店|官方|总动员|食品大卖场|零食卖场|食品专营店)/g, '').trim();
-        if (keywords) {
+        // 从拼多多店铺名提取关键词: 去掉常见后缀,取前 2-4 个字作为关键词
+        // "昀诺零食专营店" -> "昀诺", "贝鲜速食品专营店" -> "贝鲜速"
+        const cleaned = pddShopName
+          .replace(/(食品|零食|专营|旗舰|专卖|官方|总动员|大卖场|卖场|专营店|旗舰店|专卖店|店|铺)/g, '')
+          .trim();
+        // 取前 2 个字作为关键词(足够区分大多数店铺)
+        const keyword = cleaned.slice(0, 2);
+        if (keyword) {
           // 在 shops 表里找 huice_name 包含关键词的
-          const candidates = db.prepare("SELECT s.shop_id, s.huice_name FROM shops s WHERE s.huice_name LIKE ? ORDER BY LENGTH(s.huice_name) ASC LIMIT 1").get('%' + keywords + '%');
-          if (candidates) shopRow = candidates;
+          shopRow = db.prepare("SELECT s.shop_id, s.huice_name FROM shops s WHERE s.huice_name LIKE ? ORDER BY LENGTH(s.huice_name) ASC LIMIT 1").get('%' + keyword + '%');
         }
         // 精确匹配
         if (!shopRow) {
