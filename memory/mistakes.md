@@ -432,3 +432,66 @@ left.querySelector('.el-icon-arrow-left:not(.el-icon-d-arrow-left)')
   - **修复**: 用 `String(c).trim() === '店铺名称'` 精确匹配
   - **教训**: **XLSX 第一行可能是标题信息不是表头,表头检测要精确匹配不能用 includes**
   - **影响文件**: `scripts/huice/lib/shop-profit.mjs` `parseShopExportRows()`
+
+- [2026-07-10] element-ui 按钮文字带空格 "确 定" "取 消" -> 根因:el-button 两字按钮自动加空格 -> 修复:replace(/\s/g, '') 去空格比较
+  - **现象**: 慧经营"分店铺导出"弹窗的确定按钮文字是"确 定"(中间有空格),用 `=== '确定'` 永远匹配不到
+  - **根因**: element-ui 的 `.el-button` 在两个字的按钮文字中间自动插入空格,`innerText` 返回"确 定"不是"确定"
+  - **修复**: 用 `t.replace(/\s/g, '') === '确定'` 去掉所有空格再比较
+  - **教训**: **element-ui 按钮文字可能带空格! 比较前必须去空格!** "确 定" "取 消" "导 出" "关 闭" 都会这样
+  - **影响文件**: `tools/huice-shop-export-cdp.mjs` `clickExport()`
+
+- [2026-07-10] 模板字符串里 \s 要写 \\s -> 根因:JS 模板字符串转义 -> 修复:双反斜杠
+  - **现象**: `cdpEval(ws, "...replace(/\s/g, '')...")` 里的 \s 被 JS 模板字符串当成无效转义,变成 s
+  - **根因**: JS 模板字符串 ` \`...\s...` 中 \s 不是有效转义序列,会被解释成 s,正则变成 /s/g (只去掉字母 s)
+  - **修复**: 在模板字符串里写 `\\s` (双反斜杠),CDP 接收后变成 `\s`
+  - **教训**: **JS 模板字符串里的正则反斜杠要双写!** \s -> \\s, \d -> \\d, \w -> \\w
+  - **影响文件**: `tools/huice-shop-export-cdp.mjs` 多处 cdpEval 调用
+
+- [2026-07-10] 慧经营导出弹窗必须点"确 定"才提交后台 -> 根因:异步导出流程 -> 修复:点确定后等下载中心刷新
+  - **现象**: 点导出图标后弹"分店铺导出"对话框,不点"确 定"就不会提交后台生成,下载中心永远不出现新文件
+  - **根因**: 慧经营导出是异步的: 点导出图标 -> 弹对话框 -> 选"否"(不分店铺) -> 点"确 定" -> 后台开始生成 -> 几秒后下载中心出现新任务
+  - **修复**: clickExport 里先选"否"再点"确 定",点完后等"我知道了"通知出现,再去下载中心
+  - **教训**: **慧经营导出是异步的,弹窗必须点"确 定"才提交。点完后下载中心不会立刻有,要等几秒刷新才出现**
+  - **影响文件**: `tools/huice-shop-export-cdp.mjs` `clickExport()` + `downloadFromCenter()`
+
+- [2026-07-10] "我知道了"通知挡住 AG-Grid 下载按钮 -> 根因:通知浮层遮挡 -> 修复:先关通知再找按钮
+  - **现象**: 下载中心 AG-Grid 有 24 行但找不到下载按钮,因为大量"我知道了"通知浮层挡住了按钮
+  - **根因**: 每次导出完成后弹一个"我知道了"通知,累积多个后遮盖了 AG-Grid 的操作列,导致 `offsetParent` 检测不到按钮
+  - **修复**: downloadFromCenter 里先循环关闭所有"我知道了"通知,再点"查询"加载 AG-Grid,然后找"下载"文字按钮
+  - **教训**: **通知/浮层太多会挡住目标元素! 找按钮前先关掉所有通知!**
+  - **影响文件**: `tools/huice-shop-export-cdp.mjs` `downloadFromCenter()`
+
+- [2026-07-10] XLSX 第一行是标题信息不是表头 -> 根因:includes 误匹配 -> 修复:精确匹配
+  - **现象**: 店铺多维度分析 XLSX 第 0 行是"利润表名称：店铺多维度分析\n店铺范围：拼【..."等标题信息,里面包含"店铺名称"四个字
+  - **根因**: `parseShopExportRows` 用 `String(c).includes('店铺名称')` 找表头,第 0 行标题里包含"店铺名称"被误认为表头
+  - **修复**: 用 `String(c).trim() === '店铺名称'` 精确匹配
+  - **教训**: **XLSX 第一行可能是标题信息不是表头,表头检测要精确匹配不能用 includes**
+  - **影响文件**: `scripts/huice/lib/shop-profit.mjs` `parseShopExportRows()`
+
+- [2026-07-10] upsertShop 返回值从数字改成对象导致调用方报错 -> 根因:接口变更未同步 -> 修复:用 shop.shop_id
+  - **现象**: upsertShop 之前返回 shop_id 数字,改成返回 shop 对象后,调用方 `const shopId = upsertShop(...)` 拿到的是对象不是数字,SQLite 报 NOT NULL constraint
+  - **根因**: 修改 upsertShop 返回值类型(数字 -> 对象)后,没有同步修改所有调用方
+  - **修复**: 调用方改成 `const shop = upsertShop(...); shopId: shop.shop_id`
+  - **教训**: **修改函数返回值类型后,必须 grep 所有调用方同步修改!**
+  - **影响文件**: `scripts/huice/lib/db.mjs` + `tools/huice-shop-export-cdp.mjs`
+
+- [2026-07-10] 店铺日期切换残留多个面板 -> 根因:面板没关就打开新的 -> 修复:先关旧面板,用最后一个匹配面板
+  - **现象**: 日期面板有 4 个(7月/8月/6月/7月),因为之前多次打开面板没关干净
+  - **根因**: setDateRangeByPanel 没先关闭旧面板就打开新的,残留面板干扰翻月和点日期逻辑
+  - **修复**: 函数开头先 `document.body.click()` 关闭旧面板;点日期时用最后一个匹配目标月的面板(不是第一个)
+  - **教训**: **日期面板操作前先关旧面板! 多个残留面板会导致操作错误!**
+  - **影响文件**: `tools/huice-shop-export-cdp.mjs` `setDateRangeByPanel()`
+
+- [2026-07-10] 点击"确 定"按钮 DOM click 不生效 -> 根因:Vue 事件绑定方式 -> 修复:DOM click + CDP 鼠标点击双保险
+  - **现象**: `confirmBtn.click()` 点了确定按钮但弹窗不关,Vue 的事件处理没触发
+  - **根因**: element-ui 的 Vue 组件可能通过事件代理或 $emit 处理点击,DOM click 不一定触发 Vue 的处理逻辑
+  - **修复**: DOM click + span click + CDP `Input.dispatchMouseEvent` 真实鼠标点击,三重保险
+  - **教训**: **Vue 组件的按钮可能 DOM click 不生效,需要 CDP 真实鼠标点击!**
+  - **影响文件**: `tools/huice-shop-export-cdp.mjs` `clickExport()`
+
+- [2026-07-10] 店铺全选只在第一次需要 -> 根因:导航回多维分析页面后筛选保留 -> 修复:i===0 才全选
+  - **现象**: 每天都重新输入"拼"+全选,浪费时间且可能导致状态异常
+  - **根因**: 用户反馈:切换回多维分析页面时店铺筛选会保留,不需要每次都重新选
+  - **修复**: `if (i === 0) { await selectAllPddShops(ws); }` 只有第一天全选
+  - **教训**: **听用户的! 用户比代码更了解页面行为!**
+  - **影响文件**: `tools/huice-shop-export-cdp.mjs` 主循环
