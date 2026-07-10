@@ -2,26 +2,28 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在店透视浮窗的“店铺报表”里，按用户当前选择的日期范围，逐日展示当前登录拼多多店铺的推广费用、ROI、保本 ROI、费比、净利润率和净利润额；同时从慧经营按店铺维度下载全部拼多多店铺的日利润数据并写入本地数据库。
+**Goal:** 在店透视浮窗的“店铺报表”里，按用户当前选择的日期范围，逐日展示当前登录拼多多店铺的推广费用、ROI、保本 ROI、费比、净利润率和净利润额；这些指标优先使用慧经营“多维利润分析 > 更多店铺展示/按店铺展示”里已经核算好的真实店铺费用和真实净利。
 
-**Architecture:** 慧经营负责店铺级利润数据，拼多多推广页负责推广费用和 ROI，店透视浮窗只负责读取本地服务并展示。店铺映射不靠店名猜测，而是使用“当前商品列表里已经命中慧经营利润数据的商品 ID”反查它们在慧经营中的店铺；唯一候选自动绑定，多个候选进入待确认状态。
+**Architecture:** 慧经营负责店铺级利润、推广费、人工费、平台费等真实费用口径，店透视浮窗只负责读取本地服务并展示。拼多多推广页只作为核对或慧经营字段缺失时的补充参考，不作为主计算口径。店铺映射不靠店名猜测，而是使用“当前商品列表里已经命中慧经营利润数据的商品 ID”反查它们在慧经营中的店铺；唯一候选自动绑定，多个候选进入待确认状态。
 
-**Tech Stack:** Chrome MV3 extension、`dts/source/pdd-enhancer.js`、Node.js ESM、CDP Chrome、SQLite (`better-sqlite3`)、本地 HTTP 服务、慧经营 XLSX 导出、拼多多推广页面现有 `queryEntityReport` 数据。
+**Tech Stack:** Chrome MV3 extension、`dts/source/pdd-enhancer.js`、Node.js ESM、CDP Chrome、SQLite (`better-sqlite3`)、本地 HTTP 服务、慧经营店铺维度 XLSX 导出、拼多多推广页面现有 `queryEntityReport` 数据仅作可选校验。
 
 ## Global Constraints
 
 - 这是审核计划，不是直接执行清单。未经过用户确认前，不要继续跑下载脚本、不要改主分支、不要推送新实现。
 - 扩展运行目录必须是 `dts/`。改代码前按 `docs/OPERATIONS.md` 做加载来源、文件存在和 Git 跟踪三确认。
 - 只允许改店透视浮窗的“店铺报表”页签。商品列表和浮窗另外 3 个页签不得增加、删除、重排、着色或写入 DOM。
+- 本计划所有“真实费用口径”要求只适用于新增的整店铺日报数据；以前单个商品数据、商品列表利润列、商品级原始净利/调整净利逻辑一律不改。
 - 现在已有绿色 `huice-*` 列和紫色 `huice-shop-*` 列不强制删除。除非实施者已经拿到“店铺报表”的唯一运行时标识，并能证明删除只影响店铺报表，否则保留旧列，只补齐本计划的新店铺报表数据。
 - 保留店铺报表原有日期选项：昨天、近 7 日、近 1 月、自定义。默认可以是近 7 日，但实现不能写死 7 天；必须按当前页面实际选择范围逐日展示。
 - 不展示今天的未完整数据，除非用户明确选择今天且产品已有一致口径。默认日报只使用完整过去日期。
-- 慧经营原始净利和额外扣减后的净利必须分开保存。
-- 调整后净利润公式：`原始净利 - 1.15 * 订单数 - 销售额 * 2%`。
-- 用户已确认：销售件数就是订单数；每个订单固定成本是 `1.15` 元，不是 `2.85`。
+- 店铺报表口径必须使用慧经营“按店铺展示”导出的真实店铺数据。不要再用 `1.15/单`、`2% 平台费`、`2.85` 或任何估算费用重算店铺净利。
+- 慧经营店铺导出里已经包含人工费、推广费、平台费等真实费用时，必须直接保存原始字段和原始行 JSON，展示指标从这些真实字段计算或直接读取。
+- 商品级旧口径中“销售件数就是订单数”和 `1.15/单` 只适用于之前商品利润逻辑；本计划的新增店铺数据不得套用该口径，也不得反向修改商品级逻辑。
 - 多日聚合时，比例类指标必须用汇总后的分子/分母重算，不能平均每日比例、不能平均商品 ROI。
-- 净利润率：`调整后净利润 / 销售额`。保本 ROI：`1 / 净利润率`；净利润率小于等于 0 或缺失时显示 `--`。
-- 推广费比：`推广费用 / 慧经营店铺销售额`。ROI 使用拼多多推广平台同日官方汇总口径，不能平均单个商品 ROI。
+- 净利润率：优先使用慧经营导出的店铺净利润率；缺失时用 `慧经营店铺净利润 / 慧经营店铺销售收入` 重算。保本 ROI：`1 / 净利润率`；净利润率小于等于 0 或缺失时显示 `--`。
+- 推广费比：优先使用慧经营导出的推广费比；缺失时用 `慧经营店铺推广费用 / 慧经营店铺销售收入` 重算。
+- ROI：优先使用慧经营导出的店铺 ROI；缺失时用 `慧经营店铺销售收入 / 慧经营店铺推广费用` 重算；推广费用为 0 或缺失时显示 `--`。
 - 只收集商品列表里“已经能显示毛利率、净利率等慧经营数据”的商品 ID。不要把商品列表全部商品 ID 都扫一遍。
 - XLSX、SQLite、下载缓存、30 天回采数据和登录态只允许存在于已忽略的 `private/`、`output/`，不得提交。
 - HTTP 服务继续只监听 `127.0.0.1`。缺数、接口失败和映射不唯一都显示 `--` 或待确认状态，禁止用 0 猜测。
@@ -37,18 +39,18 @@
 - 金额显示 `¥1,234.56`。
 - ROI 和保本 ROI 显示两位小数。
 - 费比、净利润率显示两位百分比。
-- 调整后净利润小于 0 时，整行标红，不只是净利润额标红。
-- 推广接口成功但当天无推广：推广费用 `¥0.00`、费比 `0.00%`、ROI `--`。
-- 推广接口失败、无登录态或未打开推广平台标签：推广费用、ROI、费比均为 `--`。
-- 慧经营当天无该店铺数据：净利润额、净利润率、保本 ROI、费比均为 `--`；推广费用和 ROI 可以独立显示。
+- 慧经营真实净利润小于 0 时，整行标红，不只是净利润额标红。
+- 慧经营当天推广费为 0：推广费用 `¥0.00`、费比 `0.00%`、ROI `--`。
+- 慧经营当天缺少推广费字段：推广费用、ROI、费比显示 `--`，并保留原始行 JSON 供排查；只有用户确认后才允许用拼多多推广页补字段。
+- 慧经营当天无该店铺数据：净利润额、净利润率、保本 ROI、推广费用、ROI、费比均为 `--`。
 - 昨天显示 1 行，近 7 日显示 7 行，近 1 月显示完整日期范围内每日一行，自定义日期按实际起止日期显示。
 
 ## 当前代码事实
 
-- `dts/source/pdd-enhancer.js` 目前已经有商品利润列、店铺汇总列、商品 ID 抽取、慧经营数据读取、拼多多推广数据读取等逻辑。新功能优先复用这些能力，不要另写一套页面探测。
+- `dts/source/pdd-enhancer.js` 目前已经有商品利润列、店铺汇总列、商品 ID 抽取、慧经营数据读取、拼多多推广数据读取等逻辑。新功能优先复用商品 ID 抽取和本地服务读取能力，不要另写一套页面探测。
 - 当前源码里没有稳定的“店铺报表”字符串和唯一页签 key。页面截图里用户叫它“店铺报表”，源码里此前很多逻辑实际插到了通用弹窗表格。必须先确认运行时页签标识，再动 UI。
 - `tools/huice-export-cdp.mjs` 已有商品维度的日期切换、查询、下载中心、失败日期机制。店铺维度导出可以复用思路，但不能把店铺数据写进商品表。
-- `scripts/huice/lib/db.mjs` 已有商品利润相关表。新功能必须新增独立店铺日表和店铺映射表，旧表保持兼容。
+- `scripts/huice/lib/db.mjs` 已有商品利润相关表。新功能必须新增独立店铺日表和店铺映射表，旧表保持兼容。店铺日表保存慧经营真实字段，不保存估算后的“调整净利”。
 - 过去已经出现过主仓库误包含 30 天回采数据的问题。之后所有真实数据文件必须被 `.gitignore` 挡住，并在提交前用 `git status --ignored` 检查。
 
 ## 这次已经踩过的坑
@@ -59,22 +61,23 @@
 2. **不要上来就删绿色/紫色列。** 源码没有稳定标识能证明只删店铺报表。删错会影响商品列表或其他页签。能精准定位再删，否则只补齐。
 3. **不要扫描全店所有商品 ID。** 商品报表里很多商品没卖过，数据库没有 ID。只用已经命中慧经营利润数据的商品 ID 做店铺映射。
 4. **不要用店名字符串硬匹配。** 拼多多店铺名和慧经营店铺名不完全一致，必须用商品 ID 反查慧经营店铺候选。
-5. **不要用 `2.85`。** 本任务固定每个订单额外成本 `1.15`，平台费 `销售额 * 2%`。
-6. **不要把销售件数当销量乘成本。** 用户确认“销售件数就是订单数”，所以 `1.15 * 销售件数`。
-7. **不要平均比例。** 净利润率、费比、ROI 都用总分子/总分母重算。
-8. **慧经营店铺选择框里有两个输入框。** 第一个 `placeholder="请选择"` 是只读显示框，不是搜索框；真正输入 `拼` 的是弹层里的 `input[placeholder="搜索店铺"]:not([readonly])`。
-9. **选择全部店铺后要等列表过滤完成。** 不能输入 `拼` 后立刻点全选；要等可见店铺名全部以 `拼` 开头，再点 `全部`。
-10. **慧经营“全部”不是普通按钮。** 它是 `label.el-checkbox`，需要检查 `is-checked`；如果已经勾上，不要重复点成取消。
-11. **慧经营确认按钮是弹层里的 `.confirm`。** 不能点页面上的查询按钮误认为确认。
-12. **慧经营下载图标不是 button。** 实测下载入口是 `.export-icon-container`，里面有 `svg.export`，按 button 查找会找不到。
-13. **下载后可能先弹“导出全部链接”确认框。** 这个框的确认按钮文字可能是“确实定”，选择器必须按对话框内容精确限定，不能点页面上第一个蓝色按钮。
-14. **之后还会弹“是否分店铺下载”。** 用户要求选择“否”。如果点了“是”，会导出一堆分店铺文件，不符合入库流程。
-15. **页面可能同时有多个弹窗。** 例如转向提醒、查询结果导出、导出全部链接。必须按弹窗标题或正文精确匹配。
-16. **Codex 浏览器插件和 CDP 9222 可能不是同一个 Chrome 页面。** 用浏览器插件观察到的 DOM 不能直接代表 `tools/*.mjs` 正在控制的目标页。
-17. **下载中心匹配不能只靠最新一行。** 应按请求时间之后、文件类型/名称包含“店铺多维度分析”、状态完成来找本次文件。
-18. **XLSX 不能按固定列号读。** 慧经营表头很宽，列顺序会变。必须按表头名解析，并保留脱敏 fixture。
-19. **CDP 调用要清理 timeout。** 如果 `Runtime.evaluate` 成功后没有 `clearTimeout`，脚本可能看似结束但进程仍挂着。
-20. **先跑单日，再跑 30 天。** 不能一上来回采 30 天；必须先用昨天一日验证下载、解析、入库、展示全链路。
+5. **不要在店铺报表里套商品级估算公式。** 慧经营按店铺展示里已经有真实人工费、推广费、平台费等费用，店铺净利必须以这些真实数据为准。
+6. **不要用 `1.15`、`2%` 或 `2.85` 重算店铺净利。** 这些都不是本次店铺报表的主口径。
+7. **不要平均比例。** 净利润率、费比、ROI 都用总分子/总分母重算；如果慧经营直接导出了比例，单日展示可直接使用，多日汇总必须重算。
+8. **不要把新店铺口径反套到商品数据。** 以前单个商品的数据、商品列表上的真列和历史商品逻辑保持原状。
+9. **慧经营店铺选择框里有两个输入框。** 第一个 `placeholder="请选择"` 是只读显示框，不是搜索框；真正输入 `拼` 的是弹层里的 `input[placeholder="搜索店铺"]:not([readonly])`。
+10. **选择全部店铺后要等列表过滤完成。** 不能输入 `拼` 后立刻点全选；要等可见店铺名全部以 `拼` 开头，再点 `全部`。
+11. **慧经营“全部”不是普通按钮。** 它是 `label.el-checkbox`，需要检查 `is-checked`；如果已经勾上，不要重复点成取消。
+12. **慧经营确认按钮是弹层里的 `.confirm`。** 不能点页面上的查询按钮误认为确认。
+13. **慧经营下载图标不是 button。** 实测下载入口是 `.export-icon-container`，里面有 `svg.export`，按 button 查找会找不到。
+14. **下载后可能先弹“导出全部链接”确认框。** 这个框的确认按钮文字可能是“确实定”，选择器必须按对话框内容精确限定，不能点页面上第一个蓝色按钮。
+15. **之后还会弹“是否分店铺下载”。** 用户要求选择“否”。如果点了“是”，会导出一堆分店铺文件，不符合入库流程。
+16. **页面可能同时有多个弹窗。** 例如转向提醒、查询结果导出、导出全部链接。必须按弹窗标题或正文精确匹配。
+17. **Codex 浏览器插件和 CDP 9222 可能不是同一个 Chrome 页面。** 用浏览器插件观察到的 DOM 不能直接代表 `tools/*.mjs` 正在控制的目标页。
+18. **下载中心匹配不能只靠最新一行。** 应按请求时间之后、文件类型/名称包含“店铺多维度分析”、状态完成来找本次文件。
+19. **XLSX 不能按固定列号读。** 慧经营表头很宽，列顺序会变。必须按表头名解析，并保留脱敏 fixture。
+20. **CDP 调用要清理 timeout。** 如果 `Runtime.evaluate` 成功后没有 `clearTimeout`，脚本可能看似结束但进程仍挂着。
+21. **先跑单日，再跑 30 天。** 不能一上来回采 30 天；必须先用昨天一日验证下载、解析、入库、展示全链路。
 
 ## 数据流
 
@@ -98,7 +101,8 @@
 店透视浮窗店铺报表
   -> 读取当前日期选项
   -> GET /shop-profit?mallId=...&start=...&end=...
-  -> 本地服务合并慧经营利润和拼多多推广汇总
+  -> 本地服务返回慧经营真实店铺费用和真实净利
+  -> 必要时用拼多多推广页做人工核对，不作为默认主口径
   -> 店铺报表逐日展示
 ```
 
@@ -106,7 +110,7 @@
 
 | 文件 | 责任 |
 | --- | --- |
-| `scripts/huice/lib/shop-profit.mjs` | 新建。纯函数：日期范围、XLSX 店铺行解析、利润计算、推广汇总、映射候选、展示行格式化。 |
+| `scripts/huice/lib/shop-profit.mjs` | 新建。纯函数：日期范围、XLSX 店铺行解析、真实费用字段规范化、店铺指标计算、映射候选、展示行格式化。 |
 | `scripts/huice/lib/db.mjs` | 新增 `shop_daily_profit`、`pdd_shop_mapping` 表和查询/upsert API。 |
 | `tools/huice-shop-export-cdp.mjs` | 新建。控制慧经营页面，按日下载全部拼多多店铺数据，选择“不分店铺下载”，解析并入库。 |
 | `tools/huice-server.mjs` | 新增店铺利润查询、店铺映射候选、人工确认映射接口。 |
@@ -283,7 +287,7 @@ git commit -m "refactor(report): scope store report context"
 
 ---
 
-## Task 2: 建立店铺日利润计算和数据库模型
+## Task 2: 建立店铺真实日报解析和数据库模型
 
 **Files:**
 - Create: `scripts/huice/lib/shop-profit.mjs`
@@ -292,14 +296,12 @@ git commit -m "refactor(report): scope store report context"
 - Create: `test/shop-profit-db.test.mjs`
 
 **Interfaces:**
-- `calculateAdjustedShopProfit({ salesAmount, rawNetProfit, orderCount }) -> { orderFixedCost, platformFee, netProfit, netProfitRate }`
-- `normalizeShopExportRow(headers, row, date) -> ShopDailyRecord | null`
+- `normalizeShopExportRow(headers, row, date) -> HuiceShopDailyRecord | null`
 - `parseShopExportRows(rows, date) -> ShopDailyRecord[]`
-- `summarizePromoRecords(records) -> { status, spend, roiBase }`
-- `buildStoreReportDay({ date, shop, promo }) -> StoreReportDay`
+- `buildStoreReportDay({ date, shop }) -> StoreReportDay`
 - `resolveShopCandidates(records) -> { status: 'none' | 'unique' | 'ambiguous', candidates: ShopCandidate[] }`
 
-- [ ] **Step 1: 写计算测试**
+- [ ] **Step 1: 写真实店铺口径测试**
 
 在 `test/shop-profit.test.mjs` 写：
 
@@ -307,55 +309,53 @@ git commit -m "refactor(report): scope store report context"
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  calculateAdjustedShopProfit,
-  summarizePromoRecords,
   buildStoreReportDay,
+  parseShopExportRows,
 } from '../scripts/huice/lib/shop-profit.mjs';
 
-test('calculates adjusted profit with 1.15 per order and 2 percent platform fee', () => {
-  const result = calculateAdjustedShopProfit({
-    salesAmount: 1000,
-    rawNetProfit: 200,
-    orderCount: 10,
-  });
-
-  assert.equal(result.orderFixedCost, 11.5);
-  assert.equal(result.platformFee, 20);
-  assert.equal(result.netProfit, 168.5);
-  assert.equal(result.netProfitRate, 0.1685);
-});
-
-test('uses one over net profit rate for break-even ROI', () => {
+test('uses Huice real shop net profit without product-level estimated deductions', () => {
   const row = buildStoreReportDay({
     date: '2026-07-09',
-    shop: { salesAmount: 1000, netProfit: 125 },
-    promo: { status: 'ok', spend: 100, roiBase: 420 },
+    shop: {
+      salesAmount: 1000,
+      promoSpend: 100,
+      netProfit: 125,
+      netProfitRate: 0.125,
+    },
   });
 
+  assert.equal(row.netProfit, 125);
   assert.equal(row.netProfitRate, 0.125);
   assert.equal(row.breakEvenRoi, 8);
   assert.equal(row.promoFeeRatio, 0.1);
-  assert.equal(row.roi, 4.2);
+  assert.equal(row.roi, 10);
 });
 
-test('does not average goods ROI', () => {
-  const promo = summarizePromoRecords([
-    { spend: 10, roiBase: 100 },
-    { spend: 100, roiBase: 100 },
-  ]);
-
-  assert.equal(promo.spend, 110);
-  assert.equal(promo.roiBase, 200);
-
+test('marks the whole store day as loss when Huice real net profit is negative', () => {
   const row = buildStoreReportDay({
     date: '2026-07-09',
-    shop: { salesAmount: 1000, netProfit: -1 },
-    promo,
+    shop: { salesAmount: 1000, promoSpend: 100, netProfit: -1 },
   });
 
-  assert.equal(row.roi, 200 / 110);
   assert.equal(row.breakEvenRoi, null);
   assert.equal(row.isLoss, true);
+});
+
+test('parses Huice shop export rows by real header names and skips total rows', () => {
+  const rows = [
+    ['店铺名称', '一、销售收入', '推广费', '净利润', '净利润率'],
+    ['拼【周贝瑞', '1000.00', '100.00', '125.00', '12.50%'],
+    ['合计', '9999.00', '999.00', '999.00', '9.99%'],
+  ];
+
+  const parsed = parseShopExportRows(rows, '2026-07-09');
+
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].shopName, '拼【周贝瑞');
+  assert.equal(parsed[0].salesAmount, 1000);
+  assert.equal(parsed[0].promoSpend, 100);
+  assert.equal(parsed[0].netProfit, 125);
+  assert.equal(parsed[0].netProfitRate, 0.125);
 });
 ```
 
@@ -367,7 +367,7 @@ npm test -- test/shop-profit.test.mjs
 
 Expected: FAIL because new functions do not exist.
 
-- [ ] **Step 2: 实现最小计算函数**
+- [ ] **Step 2: 实现真实店铺指标函数**
 
 在 `scripts/huice/lib/shop-profit.mjs` 实现：
 
@@ -379,52 +379,34 @@ export function toNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-export function calculateAdjustedShopProfit({ salesAmount, rawNetProfit, orderCount }) {
-  const sales = toNumber(salesAmount);
-  const raw = toNumber(rawNetProfit);
-  const orders = toNumber(orderCount);
-  const orderFixedCost = orders == null ? null : orders * 1.15;
-  const platformFee = sales == null ? null : sales * 0.02;
-  const netProfit =
-    raw == null || orderFixedCost == null || platformFee == null
-      ? null
-      : raw - orderFixedCost - platformFee;
-  const netProfitRate = sales && netProfit != null ? netProfit / sales : null;
-
-  return { orderFixedCost, platformFee, netProfit, netProfitRate };
-}
-
-export function summarizePromoRecords(records = []) {
-  if (!records.length) return { status: 'ok', spend: 0, roiBase: 0 };
-  let spend = 0;
-  let roiBase = 0;
-  for (const record of records) {
-    spend += toNumber(record.spend) ?? 0;
-    roiBase += toNumber(record.roiBase) ?? 0;
-  }
-  return { status: 'ok', spend, roiBase };
-}
-
-export function buildStoreReportDay({ date, shop, promo }) {
+export function buildStoreReportDay({ date, shop }) {
   const salesAmount = toNumber(shop?.salesAmount);
   const netProfit = toNumber(shop?.netProfit);
-  const promoSpend = promo?.status === 'ok' ? toNumber(promo.spend) ?? 0 : null;
-  const roiBase = promo?.status === 'ok' ? toNumber(promo.roiBase) ?? 0 : null;
-  const netProfitRate = salesAmount && netProfit != null ? netProfit / salesAmount : null;
+  const promoSpend = toNumber(shop?.promoSpend);
+  const exportedNetProfitRate = toNumber(shop?.netProfitRate);
+  const exportedPromoFeeRatio = toNumber(shop?.promoFeeRatio);
+  const exportedRoi = toNumber(shop?.roi);
+  const netProfitRate =
+    exportedNetProfitRate ?? (salesAmount && netProfit != null ? netProfit / salesAmount : null);
+  const promoFeeRatio =
+    exportedPromoFeeRatio ?? (salesAmount && promoSpend != null ? promoSpend / salesAmount : null);
+  const roi = exportedRoi ?? (promoSpend ? salesAmount / promoSpend : null);
 
   return {
     date,
     salesAmount,
     promoSpend,
-    roi: promoSpend ? roiBase / promoSpend : null,
+    roi,
     breakEvenRoi: netProfitRate && netProfitRate > 0 ? 1 / netProfitRate : null,
-    promoFeeRatio: salesAmount && promoSpend != null ? promoSpend / salesAmount : null,
+    promoFeeRatio,
     netProfitRate,
     netProfit,
     isLoss: netProfit != null && netProfit < 0,
   };
 }
 ```
+
+注意：这里没有 `calculateAdjustedShopProfit`，也没有 `1.15/单`、`2% 平台费`。这些不能出现在新增店铺日报模块里。
 
 Run:
 
@@ -441,21 +423,22 @@ Expected: PASS.
 ```js
 import { normalizeShopExportRow, parseShopExportRows } from '../scripts/huice/lib/shop-profit.mjs';
 
-test('parses shop export rows by header names and skips total rows', () => {
+test('keeps Huice real expense fields in metricsJson and rawRowJson', () => {
   const rows = [
-    ['店铺名称', '一、销售收入', '净利润', '销售件数'],
-    ['拼【周贝瑞', '1000.00', '200.00', '10'],
-    ['合计', '9999.00', '999.00', '99'],
+    ['店铺名称', '一、销售收入', '推广费', '平台费', '人工费', '净利润', '净利润率'],
+    ['拼【周贝瑞', '1000.00', '100.00', '20.00', '30.00', '125.00', '12.50%'],
   ];
 
   const parsed = parseShopExportRows(rows, '2026-07-09');
 
   assert.equal(parsed.length, 1);
-  assert.equal(parsed[0].shopName, '拼【周贝瑞');
-  assert.equal(parsed[0].salesAmount, 1000);
-  assert.equal(parsed[0].rawNetProfit, 200);
-  assert.equal(parsed[0].orderCount, 10);
-  assert.equal(parsed[0].netProfit, 168.5);
+  assert.equal(parsed[0].promoSpend, 100);
+  assert.equal(parsed[0].platformFee, 20);
+  assert.equal(parsed[0].laborFee, 30);
+  assert.equal(parsed[0].netProfit, 125);
+  assert.equal(parsed[0].metrics.platformFee, 20);
+  assert.equal(parsed[0].metrics.laborFee, 30);
+  assert.deepEqual(parsed[0].rawRow['人工费'], '30.00');
 });
 ```
 
@@ -467,8 +450,13 @@ test('parses shop export rows by header names and skips total rows', () => {
 const SHOP_EXPORT_HEADERS = {
   shopName: ['店铺名称'],
   salesAmount: ['一、销售收入', '销售收入', '销售额'],
-  rawNetProfit: ['净利润', '十一、净利润', '原始净利'],
-  orderCount: ['销售件数', '订单数', '付款订单数'],
+  promoSpend: ['推广费', '推广费用', '广告费'],
+  platformFee: ['平台费', '平台服务费'],
+  laborFee: ['人工费', '包装人工', '包装人工费'],
+  netProfit: ['净利润', '十一、净利润'],
+  netProfitRate: ['净利润率', '净利率'],
+  promoFeeRatio: ['推广费比', '费比'],
+  roi: ['ROI', '投入产出比'],
 };
 ```
 
@@ -478,9 +466,10 @@ const SHOP_EXPORT_HEADERS = {
 1. 第一行必须当表头。
 2. 通过表头文字找列号，不能用固定列号。
 3. 店铺名为空、店铺名为“合计”的行跳过。
-4. rawNetProfit 缺失时整行保留，但 netProfit 为 null。
-5. orderCount 缺失时 orderFixedCost 和 netProfit 为 null。
-6. rawRowJson 保存原始行，方便后续查错。
+4. `netProfit` 缺失时整行保留，但净利润额显示 `--`。
+5. `promoSpend` 缺失时推广费用、ROI、费比显示 `--`，不能自动改用拼多多推广页，除非用户单独确认。
+6. 所有未显式建列的慧经营费用字段放进 `metricsJson`，`rawRowJson` 保存原始行，方便后续查错。
+7. 这些规则只作用于新增店铺日报数据，不影响商品级利润解析和商品列表真列。
 ```
 
 - [ ] **Step 5: 写 DB 测试**
@@ -512,8 +501,12 @@ test('stores and reads shop daily profit by mall mapping', async () => {
     shopId: shop.shop_id,
     date: '2026-07-09',
     salesAmount: 1000,
-    rawNetProfit: 200,
-    orderCount: 10,
+    promoSpend: 100,
+    platformFee: 20,
+    laborFee: 30,
+    netProfit: 125,
+    netProfitRate: 0.125,
+    metrics: { platformFee: 20, laborFee: 30 },
   });
 
   const rows = db.getShopDailyProfitRangeByMallId({
@@ -523,7 +516,8 @@ test('stores and reads shop daily profit by mall mapping', async () => {
   });
 
   assert.equal(rows.length, 1);
-  assert.equal(rows[0].net_profit, 168.5);
+  assert.equal(rows[0].net_profit, 125);
+  assert.equal(rows[0].promo_spend, 100);
 
   db.closeDb();
   delete process.env.HUICE_DB_PATH;
@@ -539,12 +533,13 @@ CREATE TABLE IF NOT EXISTS shop_daily_profit (
   shop_id INTEGER NOT NULL,
   date TEXT NOT NULL,
   sales_amount REAL,
-  raw_net_profit REAL,
-  order_count INTEGER,
-  order_fixed_cost REAL,
+  promo_spend REAL,
   platform_fee REAL,
+  labor_fee REAL,
   net_profit REAL,
   net_profit_rate REAL,
+  promo_fee_ratio REAL,
+  roi REAL,
   metrics_json TEXT NOT NULL,
   raw_row_json TEXT,
   captured_at TEXT DEFAULT (datetime('now')),
@@ -569,6 +564,8 @@ CREATE TABLE IF NOT EXISTS pdd_shop_mapping (
 ```
 
 所有 SQL 使用占位符。不得拼接 `mallId`、`shopName`、日期字符串。
+
+旧的商品级 `daily_profit`、`product_profit` 字段和计算逻辑不改；新增字段只进 `shop_daily_profit`。
 
 - [ ] **Step 7: 提交**
 
@@ -949,18 +946,27 @@ function fillDateRange({ start, end, rowsByDate }) {
 
 - [ ] **Step 3: 合并推广数据**
 
-本地服务先只返回慧经营利润数据。推广数据来自前端页面当前登录店铺，合并位置放在 `pdd-enhancer.js`，避免服务端需要拼多多登录态。
+本地服务直接返回慧经营店铺导出中的真实推广费、真实净利、净利率、费比和 ROI。前端不再默认从拼多多推广页补主数据；拼多多推广页只作为人工核对或用户另行确认后的缺字段补充来源。
 
 服务端返回字段：
 
 ```text
-date, salesAmount, rawNetProfit, orderFixedCost, platformFee, netProfit, netProfitRate
+date, salesAmount, promoSpend, platformFee, laborFee, netProfit,
+netProfitRate, promoFeeRatio, roi, breakEvenRoi, metricsJson
 ```
 
-前端再补：
+字段来源：
 
 ```text
-promoSpend, roi, promoFeeRatio, breakEvenRoi
+salesAmount     <- 慧经营“销售收入/一、销售收入”
+promoSpend      <- 慧经营“推广费/推广费用/广告费”
+platformFee     <- 慧经营“平台费/平台服务费”
+laborFee        <- 慧经营“人工费/包装人工/包装人工费”
+netProfit       <- 慧经营“净利润”
+netProfitRate   <- 慧经营“净利润率/净利率”，缺失时用 netProfit / salesAmount
+promoFeeRatio   <- 慧经营“推广费比/费比”，缺失时用 promoSpend / salesAmount
+roi             <- 慧经营“ROI/投入产出比”，缺失时用 salesAmount / promoSpend
+breakEvenRoi    <- 1 / netProfitRate
 ```
 
 - [ ] **Step 4: 提交**
@@ -981,7 +987,6 @@ git commit -m "feat(server): expose shop profit range"
 **Interfaces:**
 - `readStoreReportDateRange(context) -> { start, end, preset }`
 - `fetchShopProfitRange({ mallId, start, end }) -> Promise<ShopProfitResponse>`
-- `fetchPromoByDateRange({ start, end }) -> Promise<Map<string, PromoSummary>>`
 - `renderStoreReportDailyRows(context, days) -> void`
 
 - [ ] **Step 1: 读取现有日期选择**
@@ -1016,34 +1021,22 @@ const response = await fetch(`http://127.0.0.1:9911/shop-profit?mallId=${encodeU
 
 不要阻断原浮窗其他功能。
 
-- [ ] **Step 3: 获取拼多多推广日报**
+- [ ] **Step 3: 使用慧经营真实店铺日报字段**
 
-对每个日期调用现有推广数据读取逻辑。优先用当前代码里的 `fetchPromoWindow()` / `triggerOnDemandFetch()`，不要另写裸请求。
+前端直接使用 `/shop-profit` 返回的字段：
 
-每日数据统一成：
-
-```js
-{
-  date: '2026-07-09',
-  status: 'ok',
-  spend: 100,
-  roiBase: 420
-}
+```text
+promoSpend, roi, promoFeeRatio, netProfitRate, netProfit, breakEvenRoi
 ```
 
-如果推广页面接口失败：
+不要在这个主流程里调用 `fetchPromoWindow()` 或 `triggerOnDemandFetch()` 来重算推广费用。只有当慧经营导出缺少推广费字段、且用户另行确认要用拼多多推广页补字段时，才新开一个独立任务实现补充逻辑。
 
-```js
-{ date, status: 'unavailable', spend: null, roiBase: null }
-```
-
-- [ ] **Step 4: 合并并格式化**
+- [ ] **Step 4: 格式化**
 
 ```js
 const displayDays = profitDays.map((day) => buildStoreReportDay({
   date: day.date,
   shop: day,
-  promo: promoByDate.get(day.date) || { status: 'unavailable' },
 }));
 ```
 
@@ -1112,6 +1105,7 @@ context.root.querySelectorAll('.dts-store-profit-panel').forEach((node) => node.
 自定义 -> 起止日期内逐日行
 亏损日 -> 整行红
 商品列表 -> 无新增店铺日报面板
+商品列表 -> 原有商品级利润、原始净利/调整净利逻辑不变
 另外 3 个页签 -> 无新增店铺日报面板
 ```
 
@@ -1305,7 +1299,8 @@ PR 描述必须包含：
 - [ ] 计划没有强制删除绿色/紫色列；只有确认范围后才允许处理。
 - [ ] 计划使用商品 ID 映射店铺，不靠店名猜测。
 - [ ] 计划只收集已命中慧经营数据的商品 ID。
-- [ ] 计划按 `1.15/订单` 和 `2% 平台费` 算调整后净利。
+- [ ] 计划明确：真实费用口径只用于新增整店铺日报，不修改单个商品数据。
+- [ ] 计划明确：新增整店铺日报使用慧经营按店铺展示真实费用，不按 `1.15/订单`、`2% 平台费` 或 `2.85` 重算。
 - [ ] 计划保本 ROI 是 `1 / 净利润率`。
 - [ ] 计划明确亏损整行标红。
 - [ ] 计划先跑单日，再跑 30 天回采。
