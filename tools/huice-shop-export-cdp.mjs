@@ -289,7 +289,7 @@ async function clickQuery(ws) {
   await sleep(5000);
 }
 
-/** 点导出图标 -> 处理弹窗 -> 关闭提示 */
+/** 点导出图标 -> 轮询找"确定"按钮点掉所有弹窗 -> 等"我知道了" */
 async function clickExport(ws) {
   // 1. 点导出图标
   const exportResult = await cdpEval(ws, `(() => {
@@ -300,41 +300,28 @@ async function clickExport(ws) {
   console.log(`  📤 导出图标: ${exportResult}`);
   await sleep(2000);
 
-  // 2. 轮询处理弹窗(最多 8 轮,每轮等 1.5s)
-  // 截图实测弹窗: "分店铺导出" + "确定" 按钮
-  // 流程: 点导出图标 -> 弹"查询结果导出"(含"分店铺导出"选项) -> 点"确定"(不分店铺) -> "我知道了"
-  for (let round = 0; round < 8; round++) {
+  // 2. 轮询点"确定"按钮(最多 10 轮)
+  // 截图实测: 点导出后弹"分店铺导出"对话框,有"确定"按钮
+  // 必须点"确定"才会提交后台生成,然后才出现在下载中心
+  for (let round = 0; round < 10; round++) {
     const handled = await cdpEval(ws, `(() => {
-      const popups = [...document.querySelectorAll('.el-message-box, .el-message-box__wrapper, .el-dialog, .el-popover, [class*=message-box]')].filter(p => p.offsetParent !== null);
+      // 找所有可见的"确定"按钮(不限制父容器类型)
+      const allBtns = [...document.querySelectorAll('button, .el-button, a, [role=button]')].filter(b => b.offsetParent !== null);
       
-      for (const popup of popups) {
-        const text = (popup.innerText || '').trim();
-        const btns = [...popup.querySelectorAll('button, .el-button, .el-message-box__btns button, .el-message-box__btns .el-button')];
-        
-        // "分店铺导出"/"查询结果导出"/"导出"弹窗 -> 点"确定"
-        if (text.includes('分店铺') || text.includes('查询结果') || text.includes('导出')) {
-          // 先看有没有"否"按钮
-          const noBtn = btns.find(b => (b.innerText || '').trim() === '否');
-          if (noBtn) { noBtn.click(); return 'clicked 否'; }
-          // 没有否就点"确定"
-          const confirmBtn = btns.find(b => {
-            const t = (b.innerText || '').trim();
-            return t === '确定' || t === '确认' || t === '确实定';
-          });
-          if (confirmBtn) { confirmBtn.click(); return 'clicked 确定'; }
-        }
-        
-        // "我知道了" -> 关闭
-        const knowBtn = btns.find(b => (b.innerText || '').trim() === '我知道了');
-        if (knowBtn) { knowBtn.click(); return 'clicked 我知道了'; }
-      }
-      
-      // 全局搜"确定"按钮(fallback)
-      const confirmBtn = [...document.querySelectorAll('button, .el-button')].find(b => {
+      // 优先: 弹窗里的"确定"
+      const confirmBtn = allBtns.find(b => {
         const t = (b.innerText || '').trim();
-        return (t === '确定' || t === '确认') && b.offsetParent !== null;
+        return t.replace(/\s/g, '') === '确定' || t.replace(/\s/g, '') === '确认' || t.replace(/\s/g, '') === '确实定';
       });
-      if (confirmBtn) { confirmBtn.click(); return 'clicked 确定 (global)'; }
+      if (confirmBtn) { confirmBtn.click(); return '确定'; }
+      
+      // 其次: "否"按钮(如果弹的是是否分店铺)
+      const noBtn = allBtns.find(b => (b.innerText || '').trim() === '否');
+      if (noBtn) { noBtn.click(); return '否'; }
+      
+      // 最后: "我知道了"
+      const knowBtn = allBtns.find(b => (b.innerText || '').trim() === '我知道了');
+      if (knowBtn) { knowBtn.click(); return '我知道了'; }
       
       return 'no popup';
     })()`);
@@ -342,20 +329,11 @@ async function clickExport(ws) {
     if (handled !== 'no popup') {
       console.log(`  📤 弹窗[${round+1}]: ${handled}`);
     }
-    
-    if (handled.includes('我知道了')) break;
+    if (handled === '我知道了') break;
+    if (handled === 'no popup' && round > 2) break; // 连续没弹窗就退出
     
     await sleep(1500);
   }
-
-  // 最后再关一次"我知道了"
-  await cdpEval(ws, `(() => {
-    const btn = [...document.querySelectorAll('button, .el-button')].find(b =>
-      (b.innerText || '').trim() === '我知道了' && b.offsetParent !== null
-    );
-    if (btn) btn.click();
-    return 'ok';
-  })()`);
 }
 
 /** 去下载中心,点最新一行"店铺多维度"任务的下载按钮,返回 beforeMtime */
