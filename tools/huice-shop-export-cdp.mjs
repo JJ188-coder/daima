@@ -298,7 +298,7 @@ async function clickQuery(ws) {
   await sleep(5000);
 }
 
-/** 点导出图标 -> 点一次"确 定" -> 等"我知道了" */
+/** 点导出图标 -> 选"否"(不分店铺) -> 点"确 定" -> 去下载中心 */
 async function clickExport(ws) {
   // 1. 点导出图标
   const exportResult = await cdpEval(ws, `(() => {
@@ -309,40 +309,77 @@ async function clickExport(ws) {
   console.log(`  📤 导出图标: ${exportResult}`);
   await sleep(2000);
 
-  // 2. 点一次"确 定"(按钮文字带空格,用 \\s 在模板字符串里转义)
+  // 2. 选"否"(分店铺导出选否) - 点 radio 的 input
+  const noResult = await cdpEval(ws, `(() => {
+    const dialogs = [...document.querySelectorAll('.el-dialog')].filter(d => d.offsetParent !== null);
+    const target = dialogs.find(d => d.innerText.includes('分店铺'));
+    if (!target) return 'no dialog';
+    // 找"否"的 radio input
+    const labels = [...target.querySelectorAll('label.el-radio-button')];
+    const noLabel = labels.find(l => (l.innerText || '').trim() === '否');
+    if (!noLabel) return 'no 否 label';
+    // 如果还没选中,点 input
+    if (!noLabel.classList.contains('is-active')) {
+      const input = noLabel.querySelector('input[type=radio]');
+      if (input) { input.click(); return 'clicked input'; }
+      noLabel.click(); return 'clicked label';
+    }
+    return 'already selected';
+  })()`);
+  console.log(`  📤 分店铺选否: ${noResult}`);
+  await sleep(500);
+
+  // 3. 点"确 定"(用 DOM click + CDP 鼠标点击双保险)
   const confirmResult = await cdpEval(ws, `(() => {
-    const allBtns = [...document.querySelectorAll('button, .el-button')].filter(b => b.offsetParent !== null);
-    const confirmBtn = allBtns.find(b => {
-      const t = (b.innerText || '').trim().replace(/\\s/g, '');
-      return t === '确定' || t === '确认' || t === '确实定';
-    });
-    if (confirmBtn) { confirmBtn.click(); return 'clicked'; }
-    return 'not found';
+    const btns = [...document.querySelectorAll('button')].filter(b => b.offsetParent !== null);
+    const confirmBtn = btns.find(b => (b.innerText||'').trim().replace(/\\s/g, '') === '确定');
+    if (!confirmBtn) return 'not found';
+    // 点 button
+    confirmBtn.click();
+    // 也点 span
+    const span = confirmBtn.querySelector('span');
+    if (span) span.click();
+    return 'clicked';
   })()`);
   console.log(`  📤 确 定: ${confirmResult}`);
-  
-  // 等后台生成: 轮询等"我知道了"出现(最多 40 秒)
-  let gotNotification = false;
+  await sleep(1000);
+
+  // 4. 用 CDP 真实鼠标点击(双保险)
+  const coords = await cdpEval(ws, `(() => {
+    const btns = [...document.querySelectorAll('button')].filter(b => b.offsetParent !== null);
+    const confirmBtn = btns.find(b => (b.innerText||'').trim().replace(/\\s/g, '') === '确定');
+    if (!confirmBtn) return null;
+    const rect = confirmBtn.getBoundingClientRect();
+    return JSON.stringify({ x: Math.round(rect.left + rect.width/2), y: Math.round(rect.top + rect.height/2) });
+  })()`);
+  if (coords) {
+    const { x, y } = JSON.parse(coords);
+    await cdpCall(ws, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+    await sleep(200);
+    await cdpCall(ws, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+    await sleep(100);
+    await cdpCall(ws, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+    console.log(`  📤 CDP鼠标点击: (${x}, ${y})`);
+  }
+
+  // 5. 等后台生成(最多 40 秒)
   for (let i = 0; i < 20; i++) {
     await sleep(2000);
     const knowResult = await cdpEval(ws, `(() => {
-      const btn = [...document.querySelectorAll('button, .el-button')].find(b => {
+      const btn = [...document.querySelectorAll('button')].find(b => {
         const t = (b.innerText || '').trim();
-        return t.includes('我知道了') || t.includes('300S') || t.includes('导出成功');
+        return t.includes('我知道了') || t.includes('300S');
       });
       if (btn && btn.offsetParent !== null) { btn.click(); return 'clicked'; }
       return 'not found';
     })()`);
     if (knowResult === 'clicked') {
       console.log(`  📤 我知道了: 已关闭`);
-      gotNotification = true;
       break;
     }
   }
-  if (!gotNotification) {
-    console.log(`  📤 未等到"我知道了",继续去下载中心`);
-  }
-  // 等 3 秒让后台提交
+  
+  // 不管弹窗关没关,等 3 秒去下载中心
   await sleep(3000);
 }
 
