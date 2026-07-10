@@ -411,3 +411,24 @@ left.querySelector('.el-icon-arrow-left:not(.el-icon-d-arrow-left)')
   - **修复**: 每天循环开始时 `location.reload()` 重载页面,清除所有 Vue 组件状态。同时 `setDateRangeByPanel` 里加「先点别的日期清旧选择」逻辑
   - **教训**: **element-ui 日期面板有残留状态,跨日期切换要重载页面**。Vue 组件状态不会因 DOM 操作自动清空
   - **影响文件**: `tools/huice-export-cdp.mjs` main 循环 + `setDateRangeByPanel()`
+
+- [2026-07-10] element-ui 按钮文字"确 定"带空格 -> 根因:el-button 自动在两字按钮文字中间加空格 -> 修复:去空格比较
+  - **现象**: 慧经营店铺导出的"分店铺导出"弹窗,确定按钮的文字是"确 定"(中间有空格),用 `=== '确定'` 永远匹配不到,弹窗一直卡着没人点
+  - **根因**: element-ui 的 `.el-button` 在两个字的按钮文字中间自动插入空格(CSS letter-spacing 或 DOM 渲染),`innerText` 返回的是"确 定"不是"确定"
+  - **修复**: 用 `t.replace(/\s/g, '') === '确定'` 去掉所有空格再比较。所有 element-ui 按钮文字匹配都要这样做
+  - **教训**: **element-ui 按钮文字可能带空格! 比较前必须 `.replace(/\s/g, '')` 去空格!** "确 定" "取 消" "导 出" "关 闭" 都会这样
+  - **影响文件**: `tools/huice-shop-export-cdp.mjs` `clickExport()`
+
+- [2026-07-10] 店铺导出弹窗"确 定"必须点了才会提交后台 -> 根因:异步导出流程 -> 修复:点确定后等下载中心刷新
+  - **现象**: 点导出图标后弹"分店铺导出"对话框,不点"确 定"就不会提交后台生成,下载中心永远不出现新文件
+  - **根因**: 慧经营导出是异步的: 点导出图标 -> 弹对话框 -> 点"确 定" -> 后台开始生成 -> 几秒后下载中心出现新任务(状态"待下载") -> 点下载
+  - **修复**: clickExport 轮询点"确 定",没点到之前不退出。downloadFromCenter 等新任务状态变成"待下载"才点下载,每 3 次刷新页面让新任务出现
+  - **教训**: **慧经营导出是异步的,弹窗必须点"确 定"才提交。点完后下载中心不会立刻有,要等几秒刷新才出现**
+  - **影响文件**: `tools/huice-shop-export-cdp.mjs` `clickExport()` + `downloadFromCenter()`
+
+- [2026-07-10] 店铺 XLSX 第一行是标题信息不是表头 -> 根因:parseShopExportRows 误匹配 -> 修复:精确匹配
+  - **现象**: 店铺多维度分析 XLSX 第 0 行是"利润表名称：店铺多维度分析\n店铺范围：拼【..."等标题信息,里面包含"店铺名称"四个字
+  - **根因**: `parseShopExportRows` 用 `String(c).includes('店铺名称')` 找表头,第 0 行的标题信息里包含"店铺名称"被误认为表头
+  - **修复**: 用 `String(c).trim() === '店铺名称'` 精确匹配
+  - **教训**: **XLSX 第一行可能是标题信息不是表头,表头检测要精确匹配不能用 includes**
+  - **影响文件**: `scripts/huice/lib/shop-profit.mjs` `parseShopExportRows()`
