@@ -495,3 +495,24 @@ left.querySelector('.el-icon-arrow-left:not(.el-icon-d-arrow-left)')
   - **修复**: `if (i === 0) { await selectAllPddShops(ws); }` 只有第一天全选
   - **教训**: **听用户的! 用户比代码更了解页面行为!**
   - **影响文件**: `tools/huice-shop-export-cdp.mjs` 主循环
+
+- [2026-07-10] 拼多多推广平台日期选择器不是 element-ui -> 根因:自定义组件 anq-picker -> 修复:用 .anq-picker 打开日历
+  - **现象**: 用 .el-range-editor 和 .el-date-range-picker__content 找日期面板,全部找不到
+  - **根因**: 拼多多推广平台用的不是 element-ui,是自定义组件 anq-picker(类名 anq-picker-input / anq-picker-dropdown)
+  - **修复**: 点 .anq-picker 打开日历,在 .anq-picker-dropdown 里找 td 点日期
+  - **教训**: **不同平台用不同 UI 框架! 不能假设都是 element-ui! 先探测 DOM 再写选择器**
+  - **影响文件**: `tools/pdd-promo-cdp.mjs` `setSingleDate()`
+
+- [2026-07-10] 拼多多推广平台数字提取用 DOM 选择器失败 -> 根因:标签和数字在同一元素 -> 修复:用页面文本按行提取
+  - **现象**: findVal 函数找 `innerText === '成交营销花费(元)'` 找不到,因为实际 innerText 是 "成交营销花费(元)\n64.94"
+  - **根因**: 拼多多的数据卡片把标签和数字放在同一个 div 里,不是分开的子元素
+  - **修复**: 改用 `document.body.innerText` 按行分割,找标签行后面紧跟的数字行
+  - **教训**: **读界面数字优先用页面文本按行提取,不靠 DOM 结构! 最稳定不受 UI 框架影响**
+  - **影响文件**: `tools/pdd-promo-cdp.mjs` `readPromoData()`
+
+- [2026-07-10] "对比时间" checkbox 勾选会导致读到对比数据 -> 根因:页面同时显示两期数据 -> 修复:采集前先取消勾选
+  - **现象**: 页面上有"对比时间"checkbox,勾选后数据区会同时显示当前和对比期的数字,容易读错
+  - **根因**: 拼多多推广平台默认勾选"对比时间",数据概况区域同时显示两期数据
+  - **修复**: 切日期后先点掉 `.anq-checkbox-wrapper.anq-checkbox-wrapper-checked` 取消对比
+  - **教训**: **读数据前先关掉页面上所有可能干扰数据的选项(对比/筛选/过滤)!**
+  - **影响文件**: `tools/pdd-promo-cdp.mjs` 主循环
