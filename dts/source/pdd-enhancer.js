@@ -1153,32 +1153,9 @@ async function getPromoDataByWindow(window) {
     const alreadyInjected = cols.some(c => c.property === HUICE_COLS[0].property);
     if (!alreadyInjected) {
       try {
-        // === 锚点定位：永远靠前，绝不落末尾 ===
-        // 优先级 1：第一个推广数据列(paidTraffic-/stableCostPromotion-/fullStoreManaged-)前 —— 最可靠锚点
-        // 优先级 2：商品信息列(图/名/ID)后 —— property/label 含 goods/item/img/商品/图
-        // 优先级 3（兜底）：第 2 列（图/商品名通常在 1-2 位），保证靠前可见
-        let insertAt = -1;
-        let anchorReason = '';
-        const promoIdx = cols.findIndex(c => /^(paidTraffic|stableCostPromotion|fullStoreManaged)-/.test(c.property || ''));
-        if (promoIdx >= 0) {
-          insertAt = promoIdx;
-          anchorReason = 'before promo col "' + (cols[promoIdx]?.property || '') + '"';
-        } else {
-          // 商品信息列：property/label 含 goods/item/img/thumb/商品/图/链接
-          const goodsIdx = cols.findIndex(c => {
-            const p = (c.property || '') + (c.label || '');
-            return /goods|item|img|thumb|商品|链接|图片/i.test(p);
-          });
-          if (goodsIdx >= 0) {
-            insertAt = goodsIdx + 1;
-            anchorReason = 'after goods col "' + (cols[goodsIdx]?.property || cols[goodsIdx]?.label || '') + '"';
-          }
-        }
-        // 兜底：第 2 列（绝不落末尾！保证靠前可见）
-        if (insertAt < 0) {
-          insertAt = Math.min(2, cols.length);
-          anchorReason = 'fallback idx 2 (no promo/goods anchor found)';
-        }
+        // === 锚点定位：插到表格最前面 ===
+        let insertAt = 0;
+        let anchorReason = 'front (idx 0)';
 
         // 用一个已存在的真实列做模板（深拷贝，避免引用串数据）
         const tplCol = cols[0] || {};
@@ -1404,9 +1381,9 @@ async function getPromoDataByWindow(window) {
     const alreadyInjected = cols.some(c => c.property === SHOP_SUMMARY_COLS[0].property);
     if (alreadyInjected) return true;
 
-    // 找到最后一个 huice- 列后面插入
+    // 店铺汇总列插在绿色商品列后面(也就是表格最前面 6 列之后)
     let insertAt = cols.findIndex(c => c.property === 'huice-breakevenROI');
-    if (insertAt < 0) insertAt = cols.length;
+    if (insertAt < 0) insertAt = 0;
     else insertAt++;
 
     const tplCol = cols[0] || {};
