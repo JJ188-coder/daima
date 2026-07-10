@@ -309,11 +309,11 @@ async function clickExport(ws) {
   console.log(`  📤 导出图标: ${exportResult}`);
   await sleep(2000);
 
-  // 2. 点一次"确 定"(按钮文字带空格)
+  // 2. 点一次"确 定"(按钮文字带空格,用 \\s 在模板字符串里转义)
   const confirmResult = await cdpEval(ws, `(() => {
     const allBtns = [...document.querySelectorAll('button, .el-button')].filter(b => b.offsetParent !== null);
     const confirmBtn = allBtns.find(b => {
-      const t = (b.innerText || '').trim().replace(/\s/g, '');
+      const t = (b.innerText || '').trim().replace(/\\s/g, '');
       return t === '确定' || t === '确认' || t === '确实定';
     });
     if (confirmBtn) { confirmBtn.click(); return 'clicked'; }
@@ -321,22 +321,29 @@ async function clickExport(ws) {
   })()`);
   console.log(`  📤 确 定: ${confirmResult}`);
   
-  // 等后台生成: 轮询等"我知道了"出现(最多 30 秒)
-  for (let i = 0; i < 15; i++) {
+  // 等后台生成: 轮询等"我知道了"出现(最多 40 秒)
+  let gotNotification = false;
+  for (let i = 0; i < 20; i++) {
     await sleep(2000);
     const knowResult = await cdpEval(ws, `(() => {
       const btn = [...document.querySelectorAll('button, .el-button')].find(b => {
         const t = (b.innerText || '').trim();
-        return t.includes('我知道了') || t.includes('300S');
+        return t.includes('我知道了') || t.includes('300S') || t.includes('导出成功');
       });
       if (btn && btn.offsetParent !== null) { btn.click(); return 'clicked'; }
       return 'not found';
     })()`);
     if (knowResult === 'clicked') {
       console.log(`  📤 我知道了: 已关闭`);
+      gotNotification = true;
       break;
     }
   }
+  if (!gotNotification) {
+    console.log(`  📤 未等到"我知道了",继续去下载中心`);
+  }
+  // 等 3 秒让后台提交
+  await sleep(3000);
 }
 
 /** 去下载中心,等新任务出现再下载 */
