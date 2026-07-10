@@ -246,10 +246,18 @@ async function main() {
     }
     console.log(`  ✅ 日期已切换`);
 
-    // 2. 等数据加载
+    // 2. 关闭"对比时间"(避免读到对比数据)
+    await cdpEval(ws, `(() => {
+      const cb = document.querySelector('.anq-checkbox-wrapper.anq-checkbox-wrapper-checked');
+      if (cb && cb.textContent.includes('对比时间')) { cb.click(); return 'unchecked'; }
+      return 'not checked or not found';
+    })()`);
+    await sleep(500);
+
+    // 3. 等数据加载
     await sleep(3000);
 
-    // 3. 读推广费
+    // 4. 读推广费
     const promo = await readPromoData(ws);
     if (!promo || promo.promoSpend == null) {
       console.log(`  ⚠️ 读不到推广费数据`);
