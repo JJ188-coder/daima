@@ -1445,16 +1445,28 @@ async function getPromoDataByWindow(window) {
   function fillShopSummaryRows(dataComp, renderData, result, scannedProductCount) {
     const summary = result?.summary;
     const coverage = result ? `${result.matchedProductCount} / ${scannedProductCount}` : null;
-    for (const row of renderData) {
+    // 店铺汇总只在第一行显示,其余行显示 -- 避免视觉重复
+    for (let i = 0; i < renderData.length; i++) {
+      const row = renderData[i];
       if (!row) continue;
       const set = (prop, val) => { try { dataComp.$set(row, prop, val); } catch (e) {} };
-      set('huice-shop-salesAmount', summary?.salesAmount ?? null);
-      set('huice-shop-rawNetProfit', summary?.rawNetProfit ?? null);
-      set('huice-shop-orderFixedCost', summary?.orderFixedCost ?? null);
-      set('huice-shop-platformFee', summary?.platformFee ?? null);
-      set('huice-shop-netProfit', summary?.netProfit ?? null);
-      set('huice-shop-netProfitRate', summary?.netProfitRate ?? null);
-      set('huice-shop-coverage', coverage);
+      if (i === 0) {
+        set('huice-shop-salesAmount', summary?.salesAmount ?? null);
+        set('huice-shop-rawNetProfit', summary?.rawNetProfit ?? null);
+        set('huice-shop-orderFixedCost', summary?.orderFixedCost ?? null);
+        set('huice-shop-platformFee', summary?.platformFee ?? null);
+        set('huice-shop-netProfit', summary?.netProfit ?? null);
+        set('huice-shop-netProfitRate', summary?.netProfitRate ?? null);
+        set('huice-shop-coverage', coverage);
+      } else {
+        set('huice-shop-salesAmount', null);
+        set('huice-shop-rawNetProfit', null);
+        set('huice-shop-orderFixedCost', null);
+        set('huice-shop-platformFee', null);
+        set('huice-shop-netProfit', null);
+        set('huice-shop-netProfitRate', null);
+        set('huice-shop-coverage', null);
+      }
     }
   }
 
