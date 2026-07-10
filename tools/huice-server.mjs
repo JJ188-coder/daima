@@ -188,21 +188,17 @@ async function handler(req, res) {
         // 取前 2 个字作为关键词(足够区分大多数店铺)
         const keyword = cleaned.slice(0, 2);
         if (keyword) {
-          // 优先匹配"拼"开头的(拼多多店铺),因为拼多多店铺名以"拼"开头
+          // 只匹配"拼"开头的(拼多多店铺),排除淘宝/天猫/抖音等
           shopRow = db.prepare("SELECT s.shop_id, s.huice_name FROM shops s WHERE s.huice_name LIKE ? AND s.huice_name LIKE '拼%' ORDER BY LENGTH(s.huice_name) ASC LIMIT 1").get('%' + keyword + '%');
-          // 拼多多没有再找其他的
-          if (!shopRow) {
-            shopRow = db.prepare("SELECT s.shop_id, s.huice_name FROM shops s WHERE s.huice_name LIKE ? ORDER BY LENGTH(s.huice_name) ASC LIMIT 1").get('%' + keyword + '%');
-          }
         }
-        // 精确匹配
+        // 精确匹配(也只匹配拼多多的)
         if (!shopRow) {
-          shopRow = db.prepare("SELECT s.shop_id, s.huice_name FROM shops s WHERE s.huice_name = ? OR s.shop_name = ? LIMIT 1").get(pddShopName, pddShopName);
+          shopRow = db.prepare("SELECT s.shop_id, s.huice_name FROM shops s WHERE (s.huice_name = ? OR s.shop_name = ?) AND s.huice_name LIKE '拼%' LIMIT 1").get(pddShopName, pddShopName);
         }
       }
-      // fallback: 找有数据的第一个店铺
+      // fallback: 找有数据的拼多多店铺(只找"拼"开头的)
       if (!shopRow) {
-        shopRow = db.prepare('SELECT s.shop_id, s.huice_name FROM shop_daily_profit d JOIN shops s ON s.shop_id = d.shop_id WHERE d.date BETWEEN ? AND ? LIMIT 1').get(start, end);
+        shopRow = db.prepare("SELECT s.shop_id, s.huice_name FROM shop_daily_profit d JOIN shops s ON s.shop_id = d.shop_id WHERE s.huice_name LIKE '拼%' AND d.date BETWEEN ? AND ? LIMIT 1").get(start, end);
       }
       db.close();
 
