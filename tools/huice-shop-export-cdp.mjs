@@ -186,6 +186,10 @@ async function setDateRangeByPanel(ws, targetDate) {
   const [year, month, day] = targetDate.split('-').map(Number);
   const targetHeader = `${year} 年 ${month} 月`;
 
+  // 0. 先关闭旧面板(可能有残留)
+  await cdpEval(ws, `document.body.click()`);
+  await sleep(300);
+
   // 1. 打开日期面板
   await cdpEval(ws, `(() => {
     const editor = document.querySelector('.el-range-editor');
@@ -195,6 +199,7 @@ async function setDateRangeByPanel(ws, targetDate) {
   await sleep(1500);
 
   // 2. 翻月到目标月（最多翻 12 次）
+  // 注意: 页面可能有多个残留面板,用 querySelectorAll 取所有
   for (let attempt = 0; attempt < 12; attempt++) {
     const found = await cdpEval(ws, `(() => {
       const panels = document.querySelectorAll('.el-date-range-picker__content');
@@ -206,25 +211,29 @@ async function setDateRangeByPanel(ws, targetDate) {
     })()`);
     if (found === 'found') break;
 
-    // 往前翻一个月：点第一个面板的单箭头
+    // 往前翻一个月:点第一个面板的单箭头
     await cdpEval(ws, `(() => {
       const panels = document.querySelectorAll('.el-date-range-picker__content');
       const first = panels[0];
       if (!first) return 'no panel';
       const btn = first.querySelector('.el-icon-arrow-left');
       if (btn) { (btn.closest('button') || btn).click(); return 'prev'; }
+      // 也可能需要往后翻
+      const btnRight = first.querySelector('.el-icon-arrow-right');
+      if (btnRight) { (btnRight.closest('button') || btnRight).click(); return 'next'; }
       return 'no arrow';
     })()`);
-    await sleep(600);
+    await sleep(800);
   }
 
-  // 3. 点目标日期两次(不管当前状态,直接点同一个日期两次设单日范围)
+  // 3. 点目标日期两次(用最后一个匹配的面板,避免残留面板干扰)
   await cdpEval(ws, `(() => {
-    const panels = document.querySelectorAll('.el-date-range-picker__content');
+    const panels = [...document.querySelectorAll('.el-date-range-picker__content')];
+    // 取最后一个匹配目标月的面板(最新的)
     let targetPanel = null;
     for (const p of panels) {
       const h = p.querySelector('.el-date-range-picker__header')?.textContent?.trim() || '';
-      if (h === '${targetHeader}') { targetPanel = p; break; }
+      if (h === '${targetHeader}') targetPanel = p;
     }
     if (!targetPanel) return 'no target panel';
     // 直接找目标日期,不管状态(start-date/end-date/in-range 都不管)
@@ -289,7 +298,7 @@ async function clickQuery(ws) {
   await sleep(5000);
 }
 
-/** 点导出图标 -> 轮询找"确定"按钮点掉所有弹窗 -> 等"我知道了" */
+/** 点导出图标 -> 点一次"确 定" -> 等"我知道了" */
 async function clickExport(ws) {
   // 1. 点导出图标
   const exportResult = await cdpEval(ws, `(() => {
@@ -298,47 +307,35 @@ async function clickExport(ws) {
     return 'no export icon';
   })()`);
   console.log(`  📤 导出图标: ${exportResult}`);
-  await sleep(1000);
+  await sleep(2000);
 
-  // 2. 轮询点"确 定"按钮(最多 15 轮,每轮等 1s)
-  // 截图实测: 点导出后弹"分店铺导出"对话框,按钮文字是"确 定"(中间有空格)
-  // 必须点"确 定"才会提交后台生成,然后才出现在下载中心
-  // 没点确定之前一直等弹窗出现,不提前退出
-  let confirmed = false;
-  for (let round = 0; round < 15; round++) {
-    const handled = await cdpEval(ws, `(() => {
-      const allBtns = [...document.querySelectorAll('button, .el-button, a, [role=button]')].filter(b => b.offsetParent !== null);
-      
-      // "确 定"(去空格后比较)
-      const confirmBtn = allBtns.find(b => {
-        const t = (b.innerText || '').trim().replace(/\\s/g, '');
-        return t === '确定' || t === '确认' || t === '确实定';
-      });
-      if (confirmBtn) { confirmBtn.click(); return '确定'; }
-      
-      // "我知道了"
-      const knowBtn = allBtns.find(b => {
+  // 2. 点一次"确 定"(按钮文字带空格)
+  const confirmResult = await cdpEval(ws, `(() => {
+    const allBtns = [...document.querySelectorAll('button, .el-button')].filter(b => b.offsetParent !== null);
+    const confirmBtn = allBtns.find(b => {
+      const t = (b.innerText || '').trim().replace(/\s/g, '');
+      return t === '确定' || t === '确认' || t === '确实定';
+    });
+    if (confirmBtn) { confirmBtn.click(); return 'clicked'; }
+    return 'not found';
+  })()`);
+  console.log(`  📤 确 定: ${confirmResult}`);
+  
+  // 等后台生成: 轮询等"我知道了"出现(最多 30 秒)
+  for (let i = 0; i < 15; i++) {
+    await sleep(2000);
+    const knowResult = await cdpEval(ws, `(() => {
+      const btn = [...document.querySelectorAll('button, .el-button')].find(b => {
         const t = (b.innerText || '').trim();
         return t.includes('我知道了') || t.includes('300S');
       });
-      if (knowBtn) { knowBtn.click(); return '我知道了'; }
-      
-      return 'no popup';
+      if (btn && btn.offsetParent !== null) { btn.click(); return 'clicked'; }
+      return 'not found';
     })()`);
-    
-    if (handled !== 'no popup') {
-      console.log(`  📤 弹窗[${round+1}]: ${handled}`);
-      if (handled === '确定') confirmed = true;
+    if (knowResult === 'clicked') {
+      console.log(`  📤 我知道了: 已关闭`);
+      break;
     }
-    if (handled === '我知道了') break;
-    // 只有点了确定之后,连续 3 轮没弹窗才退出
-    if (confirmed && handled === 'no popup') break;
-    
-    await sleep(1000);
-  }
-  
-  if (!confirmed) {
-    console.log(`  ⚠️ 未点到"确 定"按钮`);
   }
 }
 
