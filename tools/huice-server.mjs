@@ -219,15 +219,20 @@ async function handler(req, res) {
         if (day.missing) {
           return { date: day.date, missing: true };
         }
+        // 用拼多多推广费重新算费比和ROI(慧经营推广费=0,用拼多多采集的)
+        const promoSpend = day.promo_spend;
+        const salesAmount = day.sales_amount;
+        const promoFeeRatio = (promoSpend != null && salesAmount > 0) ? promoSpend / salesAmount : null;
+        const roi = (promoSpend > 0 && salesAmount != null) ? salesAmount / promoSpend : null;
         return buildStoreReportDay({
           date: day.date,
           shop: {
             salesAmount: day.sales_amount,
-            promoSpend: day.promo_spend,
+            promoSpend: promoSpend,
             netProfit: day.net_profit,
             netProfitRate: day.net_profit_rate,
-            promoFeeRatio: day.promo_fee_ratio,
-            roi: day.roi,
+            promoFeeRatio: promoFeeRatio,  // 用拼多多推广费算
+            roi: roi,  // 用拼多多推广费算
           },
         });
       });
