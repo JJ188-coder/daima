@@ -321,19 +321,36 @@ async function downloadFromCenter(ws) {
 
   const beforeMtime = Date.now();
 
-  const result = await cdpEval(ws, `(() => {
-    const grid = document.querySelector('.ag-root');
-    if (!grid) return 'no grid';
-    const firstRow = grid.querySelector('.ag-center-cols-container .ag-row');
-    if (!firstRow) return 'no row';
-    const cells = [...firstRow.querySelectorAll('.ag-cell')];
-    const opCell = cells.find(c => c.getAttribute('col-id') === 'operation');
-    if (!opCell) return 'no operation cell';
-    const btn = opCell.querySelector('button');
-    if (!btn) return 'no button';
-    btn.click();
-    return 'ok';
-  })()`);
+  // 轮询等 AG-Grid 行加载完成(最多 15 秒)
+  let result = null;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    result = await cdpEval(ws, `(() => {
+      const grid = document.querySelector('.ag-root');
+      if (!grid) return 'no grid';
+      const rows = grid.querySelectorAll('.ag-center-cols-container .ag-row');
+      if (rows.length === 0) return 'no rows';
+      // 找第一行有"店铺多维度"的任务
+      for (const row of rows) {
+        const cells = [...row.querySelectorAll('.ag-cell')];
+        const taskCell = cells.find(c => (c.textContent || '').includes('店铺多维度'));
+        if (!taskCell) continue;
+        const opCell = cells.find(c => c.getAttribute('col-id') === 'operation');
+        if (!opCell) continue;
+        const btn = opCell.querySelector('button');
+        if (btn) { btn.click(); return 'ok'; }
+      }
+      // 找不到"店铺多维度"就点第一行的 button
+      const firstRow = rows[0];
+      const opCell = [...firstRow.querySelectorAll('.ag-cell')].find(c => c.getAttribute('col-id') === 'operation');
+      if (opCell) {
+        const btn = opCell.querySelector('button');
+        if (btn) { btn.click(); return 'ok (first row)'; }
+      }
+      return 'no button (rows: ' + rows.length + ')';
+    })()`);
+    if (result && result.startsWith('ok')) break;
+    await sleep(1500);
+  }
 
   if (result !== 'ok') {
     console.log(`  ⚠ 下载中心操作: ${result}`);
