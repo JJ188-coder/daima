@@ -77,7 +77,7 @@ async function cdpCall(ws, method, params = {}) {
     };
     ws.addEventListener('message', handler);
     ws.send(JSON.stringify({ id, method, params }));
-    setTimeout(() => { ws.removeEventListener('message', handler); reject(new Error(`${method} 超时`)); }, 15000);
+    setTimeout(() => { ws.removeEventListener('message', handler); reject(new Error(`${method} 超时`)); }, 30000);
   });
 }
 
@@ -188,7 +188,7 @@ async function setDateRangeByPanel(ws, targetDate) {
     await sleep(600);
   }
 
-  // 3. 第一次点日期（设开始日期）
+  // 3. 点目标日期两次(不管当前状态,直接点同一个日期两次设单日范围)
   await cdpEval(ws, `(() => {
     const panels = document.querySelectorAll('.el-date-range-picker__content');
     let targetPanel = null;
@@ -197,32 +197,17 @@ async function setDateRangeByPanel(ws, targetDate) {
       if (h === '${targetHeader}') { targetPanel = p; break; }
     }
     if (!targetPanel) return 'no target panel';
-
+    // 直接找目标日期,不管状态(start-date/end-date/in-range 都不管)
     let dayCell = [...targetPanel.querySelectorAll('td.available')].find(td =>
-      td.textContent.trim() === '${day}' &&
-      !td.classList.contains('start-date') &&
-      !td.classList.contains('end-date') &&
-      !td.classList.contains('in-range')
+      td.textContent.trim() === '${day}'
     );
-
-    // 如果目标日期已被选中,先点别的日期清掉旧选择
-    if (!dayCell) {
-      const otherCell = [...targetPanel.querySelectorAll('td.available')].find(td =>
-        td.textContent.trim() !== '${day}'
-      );
-      if (otherCell) otherCell.click();
-      dayCell = [...targetPanel.querySelectorAll('td.available')].find(td =>
-        td.textContent.trim() === '${day}'
-      );
-    }
-
     if (!dayCell) return 'no day ${day}';
-    dayCell.click();
+    dayCell.click();  // 第一次:设开始日期
     return 'first click';
   })()`);
   await sleep(1000);
 
-  // 4. 第二次点同一日期（设结束 = 开始 = 单日范围）
+  // 4. 第二次点同一日期(设结束 = 开始 = 单日范围)
   await cdpEval(ws, `(() => {
     const panels = document.querySelectorAll('.el-date-range-picker__content');
     let targetPanel = null;
@@ -231,11 +216,18 @@ async function setDateRangeByPanel(ws, targetDate) {
       if (h === '${targetHeader}') { targetPanel = p; break; }
     }
     if (!targetPanel) return 'no target panel';
-    const dayCell = [...targetPanel.querySelectorAll('td.available')].find(td =>
+    // 重新找(可能 DOM 变了)
+    let dayCell = [...targetPanel.querySelectorAll('td.available')].find(td =>
       td.textContent.trim() === '${day}'
     );
+    if (!dayCell) {
+      // 也找 td 不带 available 的(选中后可能 class 变了)
+      dayCell = [...targetPanel.querySelectorAll('td')].find(td =>
+        td.textContent.trim() === '${day}'
+      );
+    }
     if (!dayCell) return 'no day';
-    dayCell.click();
+    dayCell.click();  // 第二次:设结束日期
     return 'second click';
   })()`);
   await sleep(800);
