@@ -157,9 +157,9 @@ async function handler(req, res) {
     }
 
     // === 店铺日报利润 ===
-    // GET /shop-profit?mallId=123&start=...&end=...
+    // GET /shop-profit?pddShopName=昀诺零食专营店&start=...&end=...
     if (path === '/shop-profit') {
-      const mallId = url.searchParams.get('mallId') || 'auto';
+      const pddShopName = url.searchParams.get('pddShopName') || '';
       const start = url.searchParams.get('start');
       const end = url.searchParams.get('end');
       if (!start || !end) {
@@ -167,43 +167,49 @@ async function handler(req, res) {
         return;
       }
 
-      let mapping = getPddShopMapping(mallId);
+      // 用 pddShopName 匹配慧经营店铺
+      // 拼多多店铺名"昀诺零食专营店" -> 慧经营店铺名"拼【昀诺"或"拼【昀诺食品"
+      const Database = (await import('better-sqlite3')).default;
+      const dbPath = getDbPath();
+      if (!existsSync(dbPath)) {
+        sendJson(res, { status: 'no_mapping', mapping: null, days: [] });
+        return;
+      }
+      const db = new Database(dbPath, { readonly: true });
 
-      // mallId="auto" 时,自动找第一个有映射的店铺
-      if (!mapping && mallId === 'auto') {
-        // 没有映射就用商品 ID 反查
-        // 简化: 直接查 shop_daily_profit 表里有数据的第一个店铺
-        const Database = (await import('better-sqlite3')).default;
-        const dbPath = getDbPath();
-        if (!existsSync(dbPath)) {
-          sendJson(res, { status: 'no_mapping', mapping: null, days: [] });
-          return;
+      // 从 shop_daily_profit 表里找匹配的店铺
+      // 策略: 1.精确匹配 pddShopName 2.模糊匹配 3.返回所有有数据的店铺
+      let shopRow = null;
+      if (pddShopName) {
+        // 从拼多多店铺名提取关键词: "昀诺零食专营店" -> "昀诺"
+        const keywords = pddShopName.replace(/(食品|零食|专营|旗舰|专卖|店|官方|总动员|食品大卖场|零食卖场|食品专营店)/g, '').trim();
+        if (keywords) {
+          // 在 shops 表里找 huice_name 包含关键词的
+          const candidates = db.prepare("SELECT s.shop_id, s.huice_name FROM shops s WHERE s.huice_name LIKE ? ORDER BY LENGTH(s.huice_name) ASC LIMIT 1").get('%' + keywords + '%');
+          if (candidates) shopRow = candidates;
         }
-        const db = new Database(dbPath, { readonly: true });
-        const firstShop = db.prepare('SELECT s.shop_id, s.huice_name FROM shop_daily_profit d JOIN shops s ON s.shop_id = d.shop_id WHERE d.date BETWEEN ? AND ? LIMIT 1').get(start, end);
-        db.close();
-
-        if (firstShop) {
-          // 自动建立映射
-          upsertPddShopMapping({
-            pddMallId: 'auto',
-            pddShopName: firstShop.huice_name,
-            huiceShopId: firstShop.shop_id,
-            matchMethod: 'product_id_auto',
-            matchedProductCount: 0,
-            status: 'confirmed',
-          });
-          mapping = getPddShopMapping('auto');
+        // 精确匹配
+        if (!shopRow) {
+          shopRow = db.prepare("SELECT s.shop_id, s.huice_name FROM shops s WHERE s.huice_name = ? OR s.shop_name = ? LIMIT 1").get(pddShopName, pddShopName);
         }
       }
+      // fallback: 找有数据的第一个店铺
+      if (!shopRow) {
+        shopRow = db.prepare('SELECT s.shop_id, s.huice_name FROM shop_daily_profit d JOIN shops s ON s.shop_id = d.shop_id WHERE d.date BETWEEN ? AND ? LIMIT 1').get(start, end);
+      }
+      db.close();
 
-      if (!mapping) {
+      if (!shopRow) {
         sendJson(res, { status: 'no_mapping', mapping: null, days: [] });
         return;
       }
 
-      const rows = getShopDailyProfitRangeByMallId(mallId, start, end);
-      const rowsByDate = new Map(rows.map(r => [r.date, r]));
+      const Database2 = (await import('better-sqlite3')).default;
+      const db2 = new Database2(dbPath, { readonly: true });
+      const shopRows = db2.prepare('SELECT * FROM shop_daily_profit WHERE shop_id = ? AND date BETWEEN ? AND ? ORDER BY date').all(shopRow.shop_id, start, end);
+      db2.close();
+
+      const rowsByDate = new Map(shopRows.map(r => [r.date, r]));
       const filledDays = fillDateRange({ start, end, rowsByDate });
 
       const days = filledDays.map(day => {
@@ -226,9 +232,8 @@ async function handler(req, res) {
       sendJson(res, {
         status: 'ok',
         mapping: {
-          pddMallId: mapping.pdd_mall_id,
-          huiceShopId: mapping.huice_shop_id,
-          huiceShopName: mapping.pdd_shop_name,
+          huiceShopId: shopRow.shop_id,
+          huiceShopName: shopRow.huice_name,
         },
         days,
       });

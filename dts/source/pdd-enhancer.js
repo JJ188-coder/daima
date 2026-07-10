@@ -809,18 +809,29 @@ async function getPromoDataByWindow(window) {
     const title = (dialog.querySelector('.el-dialog__title, .el-dialog__header')?.innerText || dialog.innerText || '');
     if (!title.includes('店铺报表')) return;
 
+    // 从标题提取当前拼多多店铺名: "店铺报表-昀诺零食专营店" -> "昀诺零食专营店"
+    const shopMatch = title.match(/店铺报表[-—]\s*(.+)/);
+    const pddShopName = shopMatch ? shopMatch[1].trim() : '';
+
     // 读日期范围
     const dateText = (dialog.innerText || '').match(/统计时间[：:]\s*(\d{4}-\d{2}-\d{2})\s*[~～\--至到]\s*(\d{4}-\d{2}-\d{2})/);
     if (!dateText) return;
     const start = dateText[1];
     const end = dateText[2];
 
-    // 幂等: 移除旧面板
+    // 幂等: 面板已存在且日期范围没变就不重建
+    const existingPanel = dialog.querySelector('.dts-store-profit-panel');
+    if (existingPanel && existingPanel.dataset.dateRange === start + '~' + end) {
+      return; // 面板已渲染且日期没变,跳过
+    }
+
+    // 移除旧面板(日期变了才走到这里)
     dialog.querySelectorAll('.dts-store-profit-panel').forEach(n => n.remove());
 
     // 创建面板
     const panel = document.createElement('div');
     panel.className = 'dts-store-profit-panel';
+    panel.dataset.dateRange = start + '~' + end;
     panel.style.cssText = 'margin:8px 0;padding:8px;border:1px solid #722ed1;border-radius:4px;font-size:13px;';
 
     // 找插入点(表格 wrapper 前面)
@@ -831,24 +842,19 @@ async function getPromoDataByWindow(window) {
     panel.innerHTML = '<div style="color:#722ed1;font-weight:600;">🏪 店铺逐日利润</div><div style="color:#999;padding:4px 0;">加载中...</div>';
 
     // 异步拉取数据
-    fetchShopProfitRange(start, end).then(data => {
+    fetchShopProfitRange(start, end, pddShopName).then(data => {
       renderShopProfitPanel(panel, data, start, end);
     }).catch(err => {
       panel.innerHTML = '<div style="color:#722ed1;font-weight:600;">🏪 店铺逐日利润</div><div style="color:#f5222d;padding:4px 0;">加载失败: ' + err.message + '</div>';
     });
   }
 
-  async function fetchShopProfitRange(start, end) {
-    // mallId 从 __NEXT_DATA__ 或 cookie 读,读不到用 "auto"
-    let mallId = 'auto';
-    try {
-      const nd = window.__NEXT_DATA__;
-      if (nd?.props?.__ANQ_MODELS_INIT_STATE__?.CommonGlobalConfig?.mallId) {
-        mallId = String(nd.props.__ANQ_MODELS_INIT_STATE__.CommonGlobalConfig.mallId);
-      }
-    } catch(e) {}
+  async function fetchShopProfitRange(start, end, pddShopName) {
+    // 传 pddShopName 让服务端匹配正确的慧经营店铺
+    const params = new URLSearchParams({ start, end });
+    if (pddShopName) params.set('pddShopName', pddShopName);
 
-    const resp = await fetch(`http://127.0.0.1:9911/shop-profit?mallId=${encodeURIComponent(mallId)}&start=${start}&end=${end}`, { signal: AbortSignal.timeout(5000) });
+    const resp = await fetch(`http://127.0.0.1:9911/shop-profit?${params}`, { signal: AbortSignal.timeout(5000) });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     return await resp.json();
   }
