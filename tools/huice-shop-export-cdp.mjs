@@ -389,60 +389,63 @@ async function downloadFromCenter(ws) {
   await cdpEval(ws, `location.href = "${DOWNLOAD_CENTER_URL}"`);
   await sleep(3000);
 
+  // 先关掉所有"我知道了"通知(通知太多会挡住 AG-Grid 的下载按钮)
+  for (let i = 0; i < 5; i++) {
+    const n = await cdpEval(ws, `(() => {
+      const btns = [...document.querySelectorAll('button')].filter(b => b.offsetParent !== null);
+      let count = 0;
+      for (const b of btns) { if ((b.innerText||'').includes('我知道了')) { b.click(); count++; } }
+      return count;
+    })()`);
+    if (n === 0) break;
+    await sleep(500);
+  }
+
+  // 点"查询"让 AG-Grid 加载数据
+  await cdpEval(ws, `(() => { const btn = [...document.querySelectorAll('button')].find(b => (b.innerText||'').trim() === '查询'); if (btn) btn.click(); return 'ok'; })()`);
+  await sleep(5000);
+
   const beforeMtime = Date.now();
 
-  // 轮询等 AG-Grid 行加载 + 新任务状态变成"待下载"
-  // 点完"确 定"后后台需要几秒生成,可能刚到下载中心时还没出现
+  // 轮询等 AG-Grid 行加载 + 找下载按钮
   let result = null;
   for (let attempt = 0; attempt < 20; attempt++) {
+    // 每轮先关通知
+    await cdpEval(ws, `(() => { [...document.querySelectorAll('button')].forEach(b => { if ((b.innerText||'').includes('我知道了')) b.click(); }); return 'ok'; })()`);
+
     result = await cdpEval(ws, `(() => {
-      const grid = document.querySelector('.ag-root');
-      if (!grid) return 'no grid';
-      const rows = [...grid.querySelectorAll('.ag-center-cols-container .ag-row')];
-      if (rows.length === 0) return 'no rows';
-      // 找最新的"店铺多维度"任务(第一行就是最新的)
-      for (const row of rows) {
-        const cells = [...row.querySelectorAll('.ag-cell')];
-        const taskCell = cells.find(c => (c.textContent || '').includes('店铺多维度'));
-        if (!taskCell) continue;
-        // 检查状态: "待下载"或"可下载"才能点
-        const statusCell = cells.find(c => c.getAttribute('col-id') === 'statusName');
-        const status = (statusCell?.textContent || '').trim();
-        if (status === '待下载' || status === '可下载') {
-          const opCell = cells.find(c => c.getAttribute('col-id') === 'operation');
-          if (!opCell) continue;
-          const btn = opCell.querySelector('button');
-          if (btn) { btn.click(); return 'ok'; }
-        }
-        // 状态是"处理中"或"生成中"就继续等
-        if (status.includes('处理') || status.includes('生成') || status.includes('等待')) {
-          return 'waiting: ' + status;
-        }
+      // 找所有"下载"按钮(文字匹配)
+      const btns = [...document.querySelectorAll('button')].filter(b => b.offsetParent !== null);
+      const dlBtns = btns.filter(b => (b.innerText || '').trim() === '下载');
+      if (dlBtns.length > 0) {
+        // 点第一个下载按钮(最新的任务在第一行)
+        dlBtns[0].click();
+        return 'ok';
       }
-      return 'no ready task';
+      return 'no download btn';
     })()`);
     
     if (result === 'ok') {
-      console.log(`  ✅ 下载中心: 找到任务并点击下载`);
+      console.log(`  ✅ 下载中心: 找到下载按钮并点击`);
       break;
     }
     
-    // 如果是"waiting"说明任务还在生成,继续等
-    if (result && result.startsWith('waiting')) {
-      if (attempt % 3 === 0) console.log(`  ⏳ 下载中心: ${result}, 等待生成...`);
-    }
-    
-    // 每 3 次刷新一下页面(让新任务出现)
+    // 每 3 次刷新一下
     if (attempt > 0 && attempt % 3 === 0) {
       await cdpEval(ws, 'location.reload()');
-      await sleep(3000);
+      await sleep(4000);
+      // 刷新后再关通知+查询
+      await cdpEval(ws, `(() => { [...document.querySelectorAll('button')].forEach(b => { if ((b.innerText||'').includes('我知道了')) b.click(); }); return 'ok'; })()`);
+      await sleep(500);
+      await cdpEval(ws, `(() => { const btn = [...document.querySelectorAll('button')].find(b => (b.innerText||'').trim() === '查询'); if (btn) btn.click(); return 'ok'; })()`);
+      await sleep(5000);
     }
     
     await sleep(1500);
   }
 
   if (result !== 'ok') {
-    console.log(`  ⚠ 下载中心操作: ${result}`);
+    console.log(`  ⚠ 下载中心: 未找到下载按钮`);
   }
 
   return beforeMtime;
