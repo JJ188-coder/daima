@@ -188,8 +188,12 @@ async function handler(req, res) {
         // 取前 2 个字作为关键词(足够区分大多数店铺)
         const keyword = cleaned.slice(0, 2);
         if (keyword) {
-          // 在 shops 表里找 huice_name 包含关键词的
-          shopRow = db.prepare("SELECT s.shop_id, s.huice_name FROM shops s WHERE s.huice_name LIKE ? ORDER BY LENGTH(s.huice_name) ASC LIMIT 1").get('%' + keyword + '%');
+          // 优先匹配"拼"开头的(拼多多店铺),因为拼多多店铺名以"拼"开头
+          shopRow = db.prepare("SELECT s.shop_id, s.huice_name FROM shops s WHERE s.huice_name LIKE ? AND s.huice_name LIKE '拼%' ORDER BY LENGTH(s.huice_name) ASC LIMIT 1").get('%' + keyword + '%');
+          // 拼多多没有再找其他的
+          if (!shopRow) {
+            shopRow = db.prepare("SELECT s.shop_id, s.huice_name FROM shops s WHERE s.huice_name LIKE ? ORDER BY LENGTH(s.huice_name) ASC LIMIT 1").get('%' + keyword + '%');
+          }
         }
         // 精确匹配
         if (!shopRow) {
