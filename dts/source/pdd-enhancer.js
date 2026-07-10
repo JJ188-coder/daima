@@ -761,6 +761,29 @@ async function getPromoDataByWindow(window) {
                 console.log(HUICE_NS, huiceRecords.length > 0
                   ? '✓ injected real columns with ' + huiceRecords.length + ' huice records'
                   : '⚠️ no huice data for ' + startDate + ', columns show -- placeholder');
+
+                // === 店铺利润汇总 ===
+                injectShopSummaryColumns(tableComp);
+                if (Object.keys(huiceMap).length > 0) {
+                  // 逐页收录已命中的慧经营记录
+                  const collection = await collectMatchedReportRecords(dialog, huiceMap);
+                  if (collection.ok) {
+                    const summaryResult = summarizeMatchedHuiceRecords(Array.from(collection.matchedRecords.values()));
+                    fillShopSummaryRows(dataComp, renderData, summaryResult, collection.scannedProductIds.size);
+                    console.log(HUICE_NS, '✓ shop summary: ' + summaryResult.matchedProductCount + ' matched / ' + collection.scannedProductIds.size + ' scanned');
+                  } else {
+                    fillShopSummaryRows(dataComp, renderData, null, 0);
+                    console.log(HUICE_NS, '⚠️ shop summary failed: ' + collection.reason);
+                  }
+                  // 恢复原页后重新拿当前页 renderData 标红
+                  const currentPageData = getDialogPageData(dialog, huiceMap);
+                  if (currentPageData) {
+                    applyLossRowHighlight(dialog, currentPageData.renderData, huiceMap);
+                  }
+                } else {
+                  fillShopSummaryRows(dataComp, renderData, null, 0);
+                }
+                try { tableComp.$forceUpdate(); dataComp.$forceUpdate(); } catch (e) {}
               } else {
                 applyHuiceStrips(huiceMap, renderData);
                 console.log(HUICE_NS, '↘️ fallback to strips (real columns failed)');
@@ -1249,6 +1272,223 @@ async function getPromoDataByWindow(window) {
       console.log(HUICE_NS, '✓ filled ' + filled + '/' + renderData.length + ' rows with huice data (map size=' + Object.keys(huiceMap).length + ')');
     }
     return true;
+  }
+
+  // ============ 店铺利润汇总 ============
+
+  /** 从当前弹窗页提取商品 ID 和已命中的慧经营记录 */
+  function getDialogPageData(dialog, huiceMap) {
+    const elTable = dialog.querySelector('.el-table');
+    let tableComp = elTable?.__vue__ || null;
+    for (let el = elTable; el && !tableComp; el = el.parentElement) tableComp = el.__vue__ || null;
+    let dataComp = tableComp?.$parent || null;
+    for (let depth = 0; dataComp && depth < 8; depth++, dataComp = dataComp.$parent) {
+      const renderData = dataComp.$data?.renderData;
+      if (!Array.isArray(renderData)) continue;
+      const scannedProductIds = new Set();
+      const matchedRecords = new Map();
+      for (const row of renderData) {
+        const productId = String(row?.itemId || row?.goodsId || '');
+        if (!productId) continue;
+        scannedProductIds.add(productId);
+        const huice = huiceMap[productId];
+        if (huice && Number.isFinite(huice.netProfit)) matchedRecords.set(productId, huice);
+      }
+      return {
+        tableComp,
+        dataComp,
+        renderData,
+        scannedProductIds,
+        matchedRecords,
+        signature: [...scannedProductIds].sort().join(','),
+      };
+    }
+    return null;
+  }
+
+  async function waitForDialogPageChange(dialog, beforeSignature, huiceMap, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const page = getDialogPageData(dialog, huiceMap);
+      if (page && page.signature !== beforeSignature) return page;
+    }
+    throw new Error('product report page did not change');
+  }
+
+  async function restoreDialogPage(dialog, originalPage, previous, huiceMap, timeoutMs) {
+    try {
+      while (true) {
+        const activePage = Number(dialog.querySelector('.el-pager .number.active')?.textContent || 1);
+        if (activePage <= originalPage || previous.disabled || previous.classList.contains('disabled')) return;
+        const before = getDialogPageData(dialog, huiceMap)?.signature || '';
+        previous.click();
+        await waitForDialogPageChange(dialog, before, huiceMap, timeoutMs);
+      }
+    } catch (error) {
+      console.warn(HUICE_NS, 'failed to restore original product-report page:', error.message);
+    }
+  }
+
+  /** 逐页收录已命中慧经营记录,完成后恢复原页 */
+  async function collectMatchedReportRecords(dialog, huiceMap) {
+    const initial = getDialogPageData(dialog, huiceMap);
+    const pager = dialog.querySelector('.el-pagination');
+    const next = pager?.querySelector('.btn-next');
+    const previous = pager?.querySelector('.btn-prev');
+    if (!initial || !pager || !next || !previous) return { ok: false, reason: 'pager or renderData unavailable' };
+
+    const originalPage = Number(pager.querySelector('.el-pager .number.active')?.textContent || 1);
+    const scannedProductIds = new Set();
+    const matchedRecords = new Map();
+    let pageCount = 0;
+    try {
+      while (true) {
+        const page = getDialogPageData(dialog, huiceMap);
+        if (!page) throw new Error('renderData unavailable');
+        page.scannedProductIds.forEach(id => scannedProductIds.add(id));
+        page.matchedRecords.forEach((record, id) => matchedRecords.set(id, record));
+        pageCount++;
+        if (next.disabled || next.classList.contains('disabled')) break;
+        if (pageCount >= 200) throw new Error('product report page limit exceeded');
+        next.click();
+        await waitForDialogPageChange(dialog, page.signature, huiceMap, 5000);
+      }
+      return { ok: true, scannedProductIds, matchedRecords, pageCount };
+    } catch (error) {
+      return { ok: false, reason: error.message };
+    } finally {
+      await restoreDialogPage(dialog, originalPage, previous, huiceMap, 5000);
+    }
+  }
+
+  /** 在扩展内汇总已命中的慧经营记录 */
+  function summarizeMatchedHuiceRecords(records) {
+    const aggregated = aggregateHuiceRecords(records);
+    const matched = aggregated.filter(record => Number.isFinite(record.netProfit));
+    const sum = field => {
+      const values = matched.map(record => Number(record[field])).filter(Number.isFinite);
+      return values.length ? values.reduce((total, value) => total + value, 0) : null;
+    };
+    const salesAmount = sum('salesAmount');
+    const netProfit = sum('netProfit');
+    return {
+      matchedProductCount: matched.length,
+      summary: {
+        salesAmount,
+        rawNetProfit: sum('rawNetProfit'),
+        orderFixedCost: sum('orderFixedCost'),
+        platformFee: sum('platformFee'),
+        netProfit,
+        netProfitRate: salesAmount && salesAmount > 0 && netProfit !== null ? netProfit / salesAmount : null,
+      },
+    };
+  }
+
+  /** 店铺汇总列定义 */
+  const SHOP_SUMMARY_COLS = [
+    { property: 'huice-shop-salesAmount',   label: '店铺销售额',   fmt: v => v == null ? '--' : '¥' + Number(v).toFixed(2) },
+    { property: 'huice-shop-rawNetProfit',  label: '店铺原始净利', fmt: v => v == null ? '--' : '¥' + Number(v).toFixed(2) },
+    { property: 'huice-shop-orderFixedCost',label: '包装人工',     fmt: v => v == null ? '--' : '¥' + Number(v).toFixed(2) },
+    { property: 'huice-shop-platformFee',   label: '平台费',       fmt: v => v == null ? '--' : '¥' + Number(v).toFixed(2) },
+    { property: 'huice-shop-netProfit',     label: '店铺调整净利', fmt: v => v == null ? '--' : '¥' + Number(v).toFixed(2) },
+    { property: 'huice-shop-netProfitRate', label: '店铺调整净利率',fmt: v => v == null ? '--' : (Number(v) * 100).toFixed(2) + '%' },
+    { property: 'huice-shop-coverage',      label: '覆盖商品',     fmt: v => v == null ? '--' : String(v) },
+  ];
+
+  /** 注入店铺汇总列 */
+  function injectShopSummaryColumns(tableComp) {
+    if (!tableComp || !tableComp.store) return false;
+    const store = tableComp.store;
+    const cols = store.states.columns || [];
+    const alreadyInjected = cols.some(c => c.property === SHOP_SUMMARY_COLS[0].property);
+    if (alreadyInjected) return true;
+
+    // 找到最后一个 huice- 列后面插入
+    let insertAt = cols.findIndex(c => c.property === 'huice-breakevenROI');
+    if (insertAt < 0) insertAt = cols.length;
+    else insertAt++;
+
+    const tplCol = cols[0] || {};
+    const tplJson = {};
+    ['type', 'className', 'labelClassName', 'columnKey', 'fixed', 'resizable', 'align', 'headerAlign', 'showOverflowTooltip', 'filterable', 'filteredValue', 'filterPlacement', 'sortable', 'index', 'order', 'isColumnGroup', 'filterOpened', 'selectable'].forEach(k => { if (k in tplCol) tplJson[k] = tplCol[k]; });
+    tplJson.sortable = false;
+    tplJson.fixed = undefined;
+    tplJson.resizable = true;
+
+    for (const def of SHOP_SUMMARY_COLS) {
+      const cfg = JSON.parse(JSON.stringify(tplJson));
+      cfg.id = def.property + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+      cfg.property = def.property;
+      cfg.label = def.label;
+      cfg.realWidth = 110;
+      cfg.minWidth = 80;
+      cfg.width = 110;
+      cfg.renderHeader = function(h, { column }) {
+        return h('div', { style: 'color:#722ed1;font-weight:600;' }, column.label);
+      };
+      cfg.renderCell = function(h, { row, column }) {
+        const val = row[column.property];
+        if (column.property === 'huice-shop-netProfit' && val != null && Number(val) < 0) {
+          return h('span', { style: 'color:#f5222d;font-weight:600;' }, def.fmt(val));
+        }
+        return h('span', { style: val == null ? 'color:#bbb;' : 'color:#722ed1;' }, def.fmt(val));
+      };
+      store.commit('insertColumn', cfg, insertAt);
+      insertAt++;
+    }
+    console.log(HUICE_NS, '✓ injected 7 shop summary columns at idx ' + (insertAt - SHOP_SUMMARY_COLS.length));
+    return true;
+  }
+
+  /** 回填店铺汇总值到当前页所有行 */
+  function fillShopSummaryRows(dataComp, renderData, result, scannedProductCount) {
+    const summary = result?.summary;
+    const coverage = result ? `${result.matchedProductCount} / ${scannedProductCount}` : null;
+    for (const row of renderData) {
+      if (!row) continue;
+      const set = (prop, val) => { try { dataComp.$set(row, prop, val); } catch (e) {} };
+      set('huice-shop-salesAmount', summary?.salesAmount ?? null);
+      set('huice-shop-rawNetProfit', summary?.rawNetProfit ?? null);
+      set('huice-shop-orderFixedCost', summary?.orderFixedCost ?? null);
+      set('huice-shop-platformFee', summary?.platformFee ?? null);
+      set('huice-shop-netProfit', summary?.netProfit ?? null);
+      set('huice-shop-netProfitRate', summary?.netProfitRate ?? null);
+      set('huice-shop-coverage', coverage);
+    }
+  }
+
+  /** 亏损商品整行标红 */
+  function ensureLossRowStyle() {
+    if (document.getElementById('dts-huice-loss-row-style')) return;
+    const style = document.createElement('style');
+    style.id = 'dts-huice-loss-row-style';
+    style.textContent = `
+      .dts-huice-loss-row > td,
+      .dts-huice-loss-row > td .cell,
+      .dts-huice-loss-row > td .cell * {
+        color: #f5222d !important;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function applyLossRowHighlight(dialog, renderData, huiceMap) {
+    ensureLossRowStyle();
+    const table = dialog.querySelector('.el-table');
+    const bodies = [
+      table?.querySelector('.el-table__body-wrapper'),
+      table?.querySelector('.el-table__fixed .el-table__fixed-body-wrapper'),
+      table?.querySelector('.el-table__fixed-right .el-table__fixed-body-wrapper'),
+    ].filter(Boolean);
+    for (const body of bodies) {
+      const rows = body.querySelectorAll('tbody tr.el-table__row');
+      rows.forEach((element, index) => {
+        const productId = String(renderData[index]?.itemId || renderData[index]?.goodsId || '');
+        const isLoss = Number(huiceMap[productId]?.netProfit) < 0;
+        element.classList.toggle('dts-huice-loss-row', isLoss);
+      });
+    }
   }
 
   /**

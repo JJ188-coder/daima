@@ -140,3 +140,25 @@ export function aggregateProfitRecords(records) {
   }
   return Object.values(byProduct);
 }
+
+export function summarizeProfitRecords(records) {
+  const aggregated = aggregateProfitRecords(records);
+  const matched = aggregated.filter(record => Number.isFinite(record.netProfit));
+  const sum = field => {
+    const values = matched.map(record => record[field]).filter(Number.isFinite);
+    return values.length ? values.reduce((total, value) => total + value, 0) : null;
+  };
+  const salesAmount = sum('salesAmount');
+  const netProfit = sum('netProfit');
+  return {
+    matchedProductCount: matched.length,
+    summary: {
+      salesAmount,
+      rawNetProfit: sum('rawNetProfit'),
+      orderFixedCost: sum('orderFixedCost'),
+      platformFee: sum('platformFee'),
+      netProfit,
+      netProfitRate: salesAmount && salesAmount > 0 && netProfit !== null ? netProfit / salesAmount : null,
+    },
+  };
+}

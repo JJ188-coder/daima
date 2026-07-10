@@ -5,6 +5,7 @@ import {
   applyProfitFormula,
   aggregateProfitRecords,
   normalizeProfitRecord,
+  summarizeProfitRecords,
 } from '../scripts/huice/lib/profit.mjs';
 
 test('keeps raw Huice profit separate from adjusted profit', () => {
@@ -86,4 +87,30 @@ test('recomputes rates after multi-day aggregation', () => {
   assert.equal(agg.refundAmount, 10);
   assert.equal(agg.orderCount, 3);
   assert.equal(Number(agg.orderFixedCost.toFixed(2)), 3.45);
+});
+
+test('summarizes only already matched Huice records for a store', () => {
+  const result = summarizeProfitRecords([
+    { productId: 'a', date: '2026-07-02', salesAmount: 100, rawNetProfit: 20, orderCount: 1 },
+    { productId: 'a', date: '2026-07-03', salesAmount: 200, rawNetProfit: 60, orderCount: 2 },
+    { productId: 'b', date: '2026-07-02', salesAmount: 100, rawNetProfit: 10, orderCount: 1 },
+  ]);
+
+  assert.equal(result.matchedProductCount, 2);
+  assert.equal(result.summary.salesAmount, 400);
+  assert.equal(result.summary.rawNetProfit, 90);
+  assert.equal(Number(result.summary.orderFixedCost.toFixed(2)), 4.6);
+  assert.equal(result.summary.platformFee, 8);
+  assert.equal(Number(result.summary.netProfit.toFixed(2)), 77.4);
+  assert.equal(Number(result.summary.netProfitRate.toFixed(4)), 0.1935);
+});
+
+test('keeps missing Huice profit out of the store summary', () => {
+  const result = summarizeProfitRecords([
+    { productId: 'missing-profit', salesAmount: 100, rawNetProfit: null, netProfit: null },
+  ]);
+  assert.equal(result.matchedProductCount, 0);
+  assert.equal(result.summary.salesAmount, null);
+  assert.equal(result.summary.netProfit, null);
+  assert.equal(result.summary.netProfitRate, null);
 });
