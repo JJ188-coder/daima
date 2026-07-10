@@ -23,8 +23,13 @@ import { fileURLToPath } from 'node:url';
 import {
   getProductProfitByDate,
   getDbPath,
+  getShopDailyProfitRangeByMallId,
+  getPddShopMapping,
+  upsertPddShopMapping,
+  findShopCandidatesByProductIds,
 } from '../scripts/huice/lib/db.mjs';
 import { aggregateProfitRecords } from '../scripts/huice/lib/profit.mjs';
+import { buildStoreReportDay, fillDateRange } from '../scripts/huice/lib/shop-profit.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.HUICE_SERVER_PORT || '9911', 10);
@@ -151,8 +156,116 @@ async function handler(req, res) {
       return;
     }
 
+    // === 店铺日报利润 ===
+    // GET /shop-profit?mallId=123&start=...&end=...
+    if (path === '/shop-profit') {
+      const mallId = url.searchParams.get('mallId');
+      const start = url.searchParams.get('start');
+      const end = url.searchParams.get('end');
+      if (!mallId || !start || !end) {
+        sendJson(res, { error: 'missing mallId, start or end', status: 'no_mapping' }, 400);
+        return;
+      }
+
+      const mapping = getPddShopMapping(mallId);
+      if (!mapping) {
+        sendJson(res, { status: 'no_mapping', mapping: null, days: [] });
+        return;
+      }
+
+      const rows = getShopDailyProfitRangeByMallId(mallId, start, end);
+      const rowsByDate = new Map(rows.map(r => [r.date, r]));
+      const filledDays = fillDateRange({ start, end, rowsByDate });
+
+      const days = filledDays.map(day => {
+        if (day.missing) {
+          return { date: day.date, missing: true };
+        }
+        return buildStoreReportDay({
+          date: day.date,
+          shop: {
+            salesAmount: day.sales_amount,
+            promoSpend: day.promo_spend,
+            netProfit: day.net_profit,
+            netProfitRate: day.net_profit_rate,
+            promoFeeRatio: day.promo_fee_ratio,
+            roi: day.roi,
+          },
+        });
+      });
+
+      sendJson(res, {
+        status: 'ok',
+        mapping: {
+          pddMallId: mapping.pdd_mall_id,
+          huiceShopId: mapping.huice_shop_id,
+          huiceShopName: mapping.pdd_shop_name,
+        },
+        days,
+      });
+      return;
+    }
+
+    // POST /shop-mapping/candidates
+    if (path === '/shop-mapping/candidates' && req.method === 'POST') {
+      const body = await new Promise(resolve => {
+        let data = '';
+        req.on('data', chunk => data += chunk);
+        req.on('end', () => resolve(JSON.parse(data || '{}')));
+      });
+
+      const { mallId, pddShopName, productIds } = body;
+      if (!mallId || !productIds || !Array.isArray(productIds)) {
+        sendJson(res, { error: 'missing mallId or productIds' }, 400);
+        return;
+      }
+
+      const candidates = findShopCandidatesByProductIds(productIds);
+      if (candidates.length === 0) {
+        sendJson(res, { status: 'none', candidates: [] });
+      } else if (candidates.length === 1) {
+        upsertPddShopMapping({
+          pddMallId: mallId,
+          pddShopName: pddShopName || '',
+          huiceShopId: candidates[0].shop_id,
+          matchMethod: 'product_id_auto',
+          matchedProductCount: candidates[0].matched_product_count,
+          status: 'confirmed',
+        });
+        sendJson(res, { status: 'unique', candidates });
+      } else {
+        sendJson(res, { status: 'ambiguous', candidates });
+      }
+      return;
+    }
+
+    // POST /shop-mapping/confirm
+    if (path === '/shop-mapping/confirm' && req.method === 'POST') {
+      const body = await new Promise(resolve => {
+        let data = '';
+        req.on('data', chunk => data += chunk);
+        req.on('end', () => resolve(JSON.parse(data || '{}')));
+      });
+
+      const { mallId, pddShopName, huiceShopId } = body;
+      if (!mallId || !huiceShopId) {
+        sendJson(res, { error: 'missing mallId or huiceShopId' }, 400);
+        return;
+      }
+
+      upsertPddShopMapping({
+        pddMallId: mallId,
+        pddShopName: pddShopName || '',
+        huiceShopId,
+        matchMethod: 'manual',
+        status: 'confirmed',
+      });
+      sendJson(res, { status: 'ok' });
+      return;
+    }
+
     // 404
-    sendJson(res, { error: 'not found', paths: ['/health', '/huice/:date', '/huice?start=...&end=...', '/huice/dates'] }, 404);
+    sendJson(res, { error: 'not found', paths: ['/health', '/huice/:date', '/huice?start=...&end=...', '/huice/dates', '/shop-profit', '/shop-mapping/candidates', '/shop-mapping/confirm'] }, 404);
   } catch (e) {
     console.error(`[error] ${e.message}`);
     sendJson(res, { error: e.message }, 500);
