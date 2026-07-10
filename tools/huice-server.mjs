@@ -159,15 +159,44 @@ async function handler(req, res) {
     // === 店铺日报利润 ===
     // GET /shop-profit?mallId=123&start=...&end=...
     if (path === '/shop-profit') {
-      const mallId = url.searchParams.get('mallId');
+      const mallId = url.searchParams.get('mallId') || 'auto';
       const start = url.searchParams.get('start');
       const end = url.searchParams.get('end');
-      if (!mallId || !start || !end) {
-        sendJson(res, { error: 'missing mallId, start or end', status: 'no_mapping' }, 400);
+      if (!start || !end) {
+        sendJson(res, { error: 'missing start or end', status: 'no_mapping' }, 400);
         return;
       }
 
-      const mapping = getPddShopMapping(mallId);
+      let mapping = getPddShopMapping(mallId);
+
+      // mallId="auto" 时,自动找第一个有映射的店铺
+      if (!mapping && mallId === 'auto') {
+        // 没有映射就用商品 ID 反查
+        // 简化: 直接查 shop_daily_profit 表里有数据的第一个店铺
+        const Database = (await import('better-sqlite3')).default;
+        const dbPath = getDbPath();
+        if (!existsSync(dbPath)) {
+          sendJson(res, { status: 'no_mapping', mapping: null, days: [] });
+          return;
+        }
+        const db = new Database(dbPath, { readonly: true });
+        const firstShop = db.prepare('SELECT s.shop_id, s.huice_name FROM shop_daily_profit d JOIN shops s ON s.shop_id = d.shop_id WHERE d.date BETWEEN ? AND ? LIMIT 1').get(start, end);
+        db.close();
+
+        if (firstShop) {
+          // 自动建立映射
+          upsertPddShopMapping({
+            pddMallId: 'auto',
+            pddShopName: firstShop.huice_name,
+            huiceShopId: firstShop.shop_id,
+            matchMethod: 'product_id_auto',
+            matchedProductCount: 0,
+            status: 'confirmed',
+          });
+          mapping = getPddShopMapping('auto');
+        }
+      }
+
       if (!mapping) {
         sendJson(res, { status: 'no_mapping', mapping: null, days: [] });
         return;

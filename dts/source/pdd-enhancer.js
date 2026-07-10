@@ -839,17 +839,14 @@ async function getPromoDataByWindow(window) {
   }
 
   async function fetchShopProfitRange(start, end) {
-    // 从 URL 或 cookie 获取 mallId (简化: 用固定值或从页面读)
-    // 拼多多商家后台的 mallId 可以从 cookie 或页面全局变量获取
-    let mallId = '';
-    try { mallId = window.__PDD_MALL_ID__ || document.cookie.match(/mall_id=(\d+)/)?.[1] || ''; } catch(e) {}
-    if (!mallId) {
-      // 尝试从页面读
-      try {
-        const txt = document.body.innerText.match(/mall[_-]?id[：:](\d+)/i);
-        if (txt) mallId = txt[1];
-      } catch(e) {}
-    }
+    // mallId 从 __NEXT_DATA__ 或 cookie 读,读不到用 "auto"
+    let mallId = 'auto';
+    try {
+      const nd = window.__NEXT_DATA__;
+      if (nd?.props?.__ANQ_MODELS_INIT_STATE__?.CommonGlobalConfig?.mallId) {
+        mallId = String(nd.props.__ANQ_MODELS_INIT_STATE__.CommonGlobalConfig.mallId);
+      }
+    } catch(e) {}
 
     const resp = await fetch(`http://127.0.0.1:9911/shop-profit?mallId=${encodeURIComponent(mallId)}&start=${start}&end=${end}`, { signal: AbortSignal.timeout(5000) });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
