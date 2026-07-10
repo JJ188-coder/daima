@@ -111,7 +111,7 @@ async function switchToShopTab(ws) {
   await sleep(2000);
 }
 
-/** 选所有拼多多店铺：打开选择器 -> 输入"拼"筛选 -> 点全选 -> 关闭 */
+/** 选所有拼多多店铺：打开选择器 -> 输入"拼"筛选 -> 等列表过滤 -> 点"全部" -> 确认 */
 async function selectAllPddShops(ws) {
   // 1. 打开店铺选择器
   await cdpEval(ws, `(() => {
@@ -131,24 +131,54 @@ async function selectAllPddShops(ws) {
     input.dispatchEvent(new Event('input', { bubbles: true }));
     return 'ok';
   })()`);
-  await sleep(1500);
+  await sleep(2000);
 
-  // 3. 点"全选"
-  await cdpEval(ws, `(() => {
+  // 3. 等列表过滤完成: 检查 .level2-item 全部以"拼"开头
+  const filterOk = await cdpEval(ws, `(() => {
+    const items = [...document.querySelectorAll('.dc-shop .level2-item')];
+    if (items.length === 0) return 'no items';
+    const allPdd = items.every(el => (el.innerText || '').trim().startsWith('拼'));
+    return allPdd ? 'ok' : 'not all 拼: ' + items.map(el => (el.innerText || '').trim().slice(0, 5)).join(',');
+  })()`);
+  console.log(`  🔍 店铺筛选: ${filterOk}`);
+
+  // 4. 点"全部"(label.el-checkbox)
+  const selectResult = await cdpEval(ws, `(() => {
     const popover = document.querySelector('.dc-shop');
     if (!popover) return 'no popover';
+    // 找文本含"全部"的 label.el-checkbox
+    const checkboxes = [...popover.querySelectorAll('label.el-checkbox')];
+    const allBox = checkboxes.find(el => (el.innerText || '').trim().includes('全部'));
+    if (allBox) {
+      if (!allBox.classList.contains('is-checked')) {
+        allBox.click();
+        return 'clicked 全部';
+      }
+      return 'already checked';
+    }
+    // fallback: 找任何含"全部"文字的可点击元素
     const els = [...popover.querySelectorAll('*')];
-    const selectAll = els.find(el =>
-      (el.innerText || '').trim() === '全选' && el.offsetParent !== null
-    );
-    if (selectAll) { selectAll.click(); return 'clicked 全选'; }
-    return 'no 全选';
+    const allEl = els.find(el => (el.innerText || '').trim() === '全部' && el.offsetParent !== null);
+    if (allEl) { allEl.click(); return 'clicked 全部 (fallback)'; }
+    return 'no 全部 found';
   })()`);
-  await sleep(800);
+  console.log(`  ☑️ 全选: ${selectResult}`);
+  await sleep(1000);
 
-  // 4. 关闭 popover（点空白处）
-  await cdpEval(ws, `document.body.click()`);
+  // 5. 点确认按钮(弹层里的 .confirm)
+  const confirmResult = await cdpEval(ws, `(() => {
+    const popover = document.querySelector('.dc-shop');
+    if (!popover) return 'no popover';
+    const confirmBtn = popover.querySelector('.confirm, button.confirm, [class*=confirm]');
+    if (confirmBtn) { confirmBtn.click(); return 'clicked confirm'; }
+    return 'no confirm';
+  })()`);
+  console.log(`  ✅ 确认: ${confirmResult}`);
   await sleep(500);
+
+  // 6. 关闭残留 popover
+  await cdpEval(ws, `document.body.click()`);
+  await sleep(300);
 }
 
 /** 切日期到 targetDate（单日范围）- 面板点击方式 */
@@ -259,47 +289,69 @@ async function clickQuery(ws) {
   await sleep(5000);
 }
 
-/** 点导出图标 -> 处理"是否分店铺下载"弹窗 -> 关闭"导出完成"提示 */
+/** 点导出图标 -> 处理弹窗 -> 关闭提示 */
 async function clickExport(ws) {
   // 1. 点导出图标
-  await cdpEval(ws, `(() => {
+  const exportResult = await cdpEval(ws, `(() => {
     const el = document.querySelector('${HUICE_SHOP_SELECTORS.exportIcon}');
     if (el) { el.click(); return 'ok'; }
     return 'no export icon';
   })()`);
-  await sleep(1500);
+  console.log(`  📤 导出图标: ${exportResult}`);
+  await sleep(2000);
 
-  // 2. 如有"导出全部"popover,点它（有些版本会先弹 popover）
-  await cdpEval(ws, `(() => {
-    const items = [...document.querySelectorAll('.el-popover *')];
-    const exportAll = items.find(el => (el.innerText || '').trim() === '导出全部');
-    if (exportAll) { exportAll.click(); return 'clicked 导出全部'; }
-    return 'no 导出全部';
-  })()`);
-  await sleep(1500);
-
-  // 3. 处理"是否分店铺下载"弹窗 -> 选"否"
-  await cdpEval(ws, `(() => {
-    const containers = document.querySelectorAll('.el-message-box, .el-dialog, .el-popover, .el-message-box__wrapper');
-    for (const c of containers) {
-      const btns = c.querySelectorAll('button, .el-button');
-      for (const b of btns) {
-        if ((b.innerText || '').trim() === '否') { b.click(); return 'clicked 否'; }
+  // 2. 轮询处理弹窗(最多 8 轮,每轮等 1.5s)
+  // 截图实测弹窗: "分店铺导出" + "确定" 按钮
+  // 流程: 点导出图标 -> 弹"查询结果导出"(含"分店铺导出"选项) -> 点"确定"(不分店铺) -> "我知道了"
+  for (let round = 0; round < 8; round++) {
+    const handled = await cdpEval(ws, `(() => {
+      const popups = [...document.querySelectorAll('.el-message-box, .el-message-box__wrapper, .el-dialog, .el-popover, [class*=message-box]')].filter(p => p.offsetParent !== null);
+      
+      for (const popup of popups) {
+        const text = (popup.innerText || '').trim();
+        const btns = [...popup.querySelectorAll('button, .el-button, .el-message-box__btns button, .el-message-box__btns .el-button')];
+        
+        // "分店铺导出"/"查询结果导出"/"导出"弹窗 -> 点"确定"
+        if (text.includes('分店铺') || text.includes('查询结果') || text.includes('导出')) {
+          // 先看有没有"否"按钮
+          const noBtn = btns.find(b => (b.innerText || '').trim() === '否');
+          if (noBtn) { noBtn.click(); return 'clicked 否'; }
+          // 没有否就点"确定"
+          const confirmBtn = btns.find(b => {
+            const t = (b.innerText || '').trim();
+            return t === '确定' || t === '确认' || t === '确实定';
+          });
+          if (confirmBtn) { confirmBtn.click(); return 'clicked 确定'; }
+        }
+        
+        // "我知道了" -> 关闭
+        const knowBtn = btns.find(b => (b.innerText || '').trim() === '我知道了');
+        if (knowBtn) { knowBtn.click(); return 'clicked 我知道了'; }
       }
+      
+      // 全局搜"确定"按钮(fallback)
+      const confirmBtn = [...document.querySelectorAll('button, .el-button')].find(b => {
+        const t = (b.innerText || '').trim();
+        return (t === '确定' || t === '确认') && b.offsetParent !== null;
+      });
+      if (confirmBtn) { confirmBtn.click(); return 'clicked 确定 (global)'; }
+      
+      return 'no popup';
+    })()`);
+    
+    if (handled !== 'no popup') {
+      console.log(`  📤 弹窗[${round+1}]: ${handled}`);
     }
-    // fallback：全局搜"否"按钮
-    const btn = [...document.querySelectorAll('button, .el-button')].find(b =>
-      (b.innerText || '').trim() === '否'
-    );
-    if (btn) { btn.click(); return 'clicked 否 (fallback)'; }
-    return 'no 否 button';
-  })()`);
-  await sleep(6000);
+    
+    if (handled.includes('我知道了')) break;
+    
+    await sleep(1500);
+  }
 
-  // 4. 关闭"导出完成"提示
+  // 最后再关一次"我知道了"
   await cdpEval(ws, `(() => {
     const btn = [...document.querySelectorAll('button, .el-button')].find(b =>
-      (b.innerText || '').trim() === '我知道了'
+      (b.innerText || '').trim() === '我知道了' && b.offsetParent !== null
     );
     if (btn) btn.click();
     return 'ok';
