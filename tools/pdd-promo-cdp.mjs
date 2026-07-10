@@ -135,26 +135,26 @@ async function setSingleDate(ws, targetDate) {
 /** 从页面读推广费数据 */
 async function readPromoData(ws) {
   const result = await cdpEval(ws, `(() => {
-    const els = [...document.querySelectorAll('*')];
-    function findVal(label) {
-      const label2 = els.find(el => (el.innerText || '').trim() === label);
-      if (!label2) return null;
-      let p = label2.parentElement;
-      for (let i = 0; i < 5 && p; i++) {
-        const nums = [...p.querySelectorAll('*')].filter(el => el.children.length === 0 && /^[\\d,.]+$/.test((el.innerText||'').trim()));
-        if (nums.length > 0) return parseFloat(nums[0].innerText.trim().replace(/,/g, ''));
-        p = p.parentElement;
+    const text = document.body.innerText;
+    const lines = text.split('\\n');
+    const results = {};
+    const labels = {
+      promoSpend: '成交营销花费(元)',
+      gmv: '交易额(元)',
+      roi: '实际投产比',
+    };
+    for (const key in labels) {
+      const label = labels[key];
+      const idx = lines.findIndex(l => l.trim() === label);
+      if (idx >= 0 && idx + 1 < lines.length) {
+        const val = lines[idx + 1].trim().replace(/,/g, '');
+        const num = parseFloat(val);
+        if (!isNaN(num)) results[key] = num;
       }
-      return null;
     }
-    // 读店铺名
-    const shopMatch = (document.body.innerText || '').match(/([\u4e00-\u9fa5\w]+(?:专营店|旗舰店|专卖店))/);
-    return JSON.stringify({
-      promoSpend: findVal('成交营销花费(元)'),
-      gmv: findVal('交易额(元)'),
-      roi: findVal('实际投产比'),
-      shopName: shopMatch ? shopMatch[1] : '',
-    });
+    const shopMatch = text.match(/([\u4e00-\u9fa5\\w]+(?:专营店|旗舰店|专卖店))/);
+    if (shopMatch) results.shopName = shopMatch[1];
+    return JSON.stringify(results);
   })()`);
   return result ? JSON.parse(result) : null;
 }
