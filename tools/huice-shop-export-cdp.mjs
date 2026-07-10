@@ -573,8 +573,19 @@ async function main() {
       }
       console.log(`  📄 下载完成: ${path.basename(xlsxPath)}`);
 
-      // 9. 解析 xlsx（动态表头：Python 读原始行 -> parseShopExportRows 按表头名找列）
+      // 9. 解析 xlsx
       const rawRows = parseXlsxRaw(xlsxPath);
+
+      // 9.1 验证 xlsx 里的时间范围是否跟目标日期一致
+      const titleStr = String(rawRows[0]?.[0] || '');
+      const xlsxDateMatch = titleStr.match(/时间范围[：:]\s*(\d{4}-\d{2}-\d{2})/);
+      const xlsxDate = xlsxDateMatch ? xlsxDateMatch[1] : '';
+      if (xlsxDate && xlsxDate !== targetDate) {
+        console.log(`  ⚠️ xlsx 时间范围是 ${xlsxDate}, 不是 ${targetDate}, 日期切换失败,跳过`);
+        failedDates.push(targetDate);
+        continue;
+      }
+
       const records = parseShopExportRows(rawRows, targetDate);
       const profitCount = records.filter(r => r.netProfit != null).length;
       console.log(`  ✅ ${records.length} 家店铺 (netProfit 有值: ${profitCount})`);
