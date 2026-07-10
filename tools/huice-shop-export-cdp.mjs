@@ -298,29 +298,29 @@ async function clickExport(ws) {
     return 'no export icon';
   })()`);
   console.log(`  📤 导出图标: ${exportResult}`);
-  await sleep(2000);
+  await sleep(1000);
 
-  // 2. 轮询点"确定"按钮(最多 10 轮)
-  // 截图实测: 点导出后弹"分店铺导出"对话框,有"确定"按钮
-  // 必须点"确定"才会提交后台生成,然后才出现在下载中心
-  for (let round = 0; round < 10; round++) {
+  // 2. 轮询点"确 定"按钮(最多 15 轮,每轮等 1s)
+  // 截图实测: 点导出后弹"分店铺导出"对话框,按钮文字是"确 定"(中间有空格)
+  // 必须点"确 定"才会提交后台生成,然后才出现在下载中心
+  // 没点确定之前一直等弹窗出现,不提前退出
+  let confirmed = false;
+  for (let round = 0; round < 15; round++) {
     const handled = await cdpEval(ws, `(() => {
-      // 找所有可见的"确定"按钮(不限制父容器类型)
       const allBtns = [...document.querySelectorAll('button, .el-button, a, [role=button]')].filter(b => b.offsetParent !== null);
       
-      // 优先: 弹窗里的"确定"
+      // "确 定"(去空格后比较)
       const confirmBtn = allBtns.find(b => {
-        const t = (b.innerText || '').trim();
-        return t.replace(/\s/g, '') === '确定' || t.replace(/\s/g, '') === '确认' || t.replace(/\s/g, '') === '确实定';
+        const t = (b.innerText || '').trim().replace(/\\s/g, '');
+        return t === '确定' || t === '确认' || t === '确实定';
       });
       if (confirmBtn) { confirmBtn.click(); return '确定'; }
       
-      // 其次: "否"按钮(如果弹的是是否分店铺)
-      const noBtn = allBtns.find(b => (b.innerText || '').trim() === '否');
-      if (noBtn) { noBtn.click(); return '否'; }
-      
-      // 最后: "我知道了"
-      const knowBtn = allBtns.find(b => (b.innerText || '').trim() === '我知道了');
+      // "我知道了"
+      const knowBtn = allBtns.find(b => {
+        const t = (b.innerText || '').trim();
+        return t.includes('我知道了') || t.includes('300S');
+      });
       if (knowBtn) { knowBtn.click(); return '我知道了'; }
       
       return 'no popup';
@@ -328,46 +328,75 @@ async function clickExport(ws) {
     
     if (handled !== 'no popup') {
       console.log(`  📤 弹窗[${round+1}]: ${handled}`);
+      if (handled === '确定') confirmed = true;
     }
     if (handled === '我知道了') break;
-    if (handled === 'no popup' && round > 2) break; // 连续没弹窗就退出
+    // 只有点了确定之后,连续 3 轮没弹窗才退出
+    if (confirmed && handled === 'no popup') break;
     
-    await sleep(1500);
+    await sleep(1000);
+  }
+  
+  if (!confirmed) {
+    console.log(`  ⚠️ 未点到"确 定"按钮`);
   }
 }
 
-/** 去下载中心,点最新一行"店铺多维度"任务的下载按钮,返回 beforeMtime */
+/** 去下载中心,等新任务出现再下载 */
 async function downloadFromCenter(ws) {
+  // 去下载中心
   await cdpEval(ws, `location.href = "${DOWNLOAD_CENTER_URL}"`);
-  await sleep(4000);
+  await sleep(3000);
 
   const beforeMtime = Date.now();
 
-  // 轮询等 AG-Grid 行加载完成(最多 15 秒)
+  // 轮询等 AG-Grid 行加载 + 新任务状态变成"待下载"
+  // 点完"确 定"后后台需要几秒生成,可能刚到下载中心时还没出现
   let result = null;
-  for (let attempt = 0; attempt < 10; attempt++) {
+  for (let attempt = 0; attempt < 20; attempt++) {
     result = await cdpEval(ws, `(() => {
       const grid = document.querySelector('.ag-root');
       if (!grid) return 'no grid';
       const rows = [...grid.querySelectorAll('.ag-center-cols-container .ag-row')];
       if (rows.length === 0) return 'no rows';
-      // 找最新的"店铺多维度"任务(第一行就是最新的,因为按创建时间倒序)
+      // 找最新的"店铺多维度"任务(第一行就是最新的)
       for (const row of rows) {
         const cells = [...row.querySelectorAll('.ag-cell')];
         const taskCell = cells.find(c => (c.textContent || '').includes('店铺多维度'));
         if (!taskCell) continue;
-        // 检查状态: 只下载"待下载"的
+        // 检查状态: "待下载"或"可下载"才能点
         const statusCell = cells.find(c => c.getAttribute('col-id') === 'statusName');
         const status = (statusCell?.textContent || '').trim();
-        if (status && status !== '待下载' && status !== '可下载') continue;
-        const opCell = cells.find(c => c.getAttribute('col-id') === 'operation');
-        if (!opCell) continue;
-        const btn = opCell.querySelector('button');
-        if (btn) { btn.click(); return 'ok'; }
+        if (status === '待下载' || status === '可下载') {
+          const opCell = cells.find(c => c.getAttribute('col-id') === 'operation');
+          if (!opCell) continue;
+          const btn = opCell.querySelector('button');
+          if (btn) { btn.click(); return 'ok'; }
+        }
+        // 状态是"处理中"或"生成中"就继续等
+        if (status.includes('处理') || status.includes('生成') || status.includes('等待')) {
+          return 'waiting: ' + status;
+        }
       }
-      return 'no button (rows: ' + rows.length + ')';
+      return 'no ready task';
     })()`);
-    if (result && result.startsWith('ok')) break;
+    
+    if (result === 'ok') {
+      console.log(`  ✅ 下载中心: 找到任务并点击下载`);
+      break;
+    }
+    
+    // 如果是"waiting"说明任务还在生成,继续等
+    if (result && result.startsWith('waiting')) {
+      if (attempt % 3 === 0) console.log(`  ⏳ 下载中心: ${result}, 等待生成...`);
+    }
+    
+    // 每 3 次刷新一下页面(让新任务出现)
+    if (attempt > 0 && attempt % 3 === 0) {
+      await cdpEval(ws, 'location.reload()');
+      await sleep(3000);
+    }
+    
     await sleep(1500);
   }
 
