@@ -314,7 +314,7 @@ async function clickExport(ws) {
   })()`);
 }
 
-/** 去下载中心,点第一行 operation 列的下载按钮,返回 beforeMtime */
+/** 去下载中心,点最新一行"店铺多维度"任务的下载按钮,返回 beforeMtime */
 async function downloadFromCenter(ws) {
   await cdpEval(ws, `location.href = "${DOWNLOAD_CENTER_URL}"`);
   await sleep(4000);
@@ -327,24 +327,21 @@ async function downloadFromCenter(ws) {
     result = await cdpEval(ws, `(() => {
       const grid = document.querySelector('.ag-root');
       if (!grid) return 'no grid';
-      const rows = grid.querySelectorAll('.ag-center-cols-container .ag-row');
+      const rows = [...grid.querySelectorAll('.ag-center-cols-container .ag-row')];
       if (rows.length === 0) return 'no rows';
-      // 找第一行有"店铺多维度"的任务
+      // 找最新的"店铺多维度"任务(第一行就是最新的,因为按创建时间倒序)
       for (const row of rows) {
         const cells = [...row.querySelectorAll('.ag-cell')];
         const taskCell = cells.find(c => (c.textContent || '').includes('店铺多维度'));
         if (!taskCell) continue;
+        // 检查状态: 只下载"待下载"的
+        const statusCell = cells.find(c => c.getAttribute('col-id') === 'statusName');
+        const status = (statusCell?.textContent || '').trim();
+        if (status && status !== '待下载' && status !== '可下载') continue;
         const opCell = cells.find(c => c.getAttribute('col-id') === 'operation');
         if (!opCell) continue;
         const btn = opCell.querySelector('button');
         if (btn) { btn.click(); return 'ok'; }
-      }
-      // 找不到"店铺多维度"就点第一行的 button
-      const firstRow = rows[0];
-      const opCell = [...firstRow.querySelectorAll('.ag-cell')].find(c => c.getAttribute('col-id') === 'operation');
-      if (opCell) {
-        const btn = opCell.querySelector('button');
-        if (btn) { btn.click(); return 'ok (first row)'; }
       }
       return 'no button (rows: ' + rows.length + ')';
     })()`);
