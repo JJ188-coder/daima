@@ -247,9 +247,9 @@ export function upsertShop(huiceName) {
       updated_at = datetime('now')
   `);
   const info = stmt.run(huiceName, platform, shopName);
-  // 返回 shop_id(可能是新建的或已存在的)
-  const row = db.prepare('SELECT shop_id FROM shops WHERE huice_name = ?').get(huiceName);
-  return row.shop_id;
+  // 返回 shop 对象
+  const row = db.prepare('SELECT shop_id, huice_name, shop_name FROM shops WHERE huice_name = ?').get(huiceName);
+  return row;
 }
 
 /** 批量插入每日利润(有则更新) */
@@ -498,10 +498,11 @@ export function findShopCandidatesByProductIds(productIds) {
   if (!productIds || productIds.length === 0) return [];
   const db = getDb();
   const placeholders = productIds.map(() => '?').join(',');
+  // product_profit.shop_id 可能为 null,用 shop_name 关联 shops.huice_name
   return db.prepare(`
     SELECT s.shop_id, s.huice_name AS shop_name, COUNT(DISTINCT p.product_id) AS matched_product_count
     FROM product_profit p
-    JOIN shops s ON s.shop_id = p.shop_id
+    JOIN shops s ON s.huice_name = p.shop_name
     WHERE p.product_id IN (${placeholders})
     GROUP BY s.shop_id, s.huice_name
     ORDER BY matched_product_count DESC, s.huice_name ASC

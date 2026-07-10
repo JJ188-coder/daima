@@ -8,12 +8,12 @@
 const SHOP_EXPORT_HEADERS = {
   shopName: ['店铺名称'],
   salesAmount: ['一、销售收入', '销售收入', '销售额'],
-  promoSpend: ['推广费', '推广费用', '广告费'],
-  platformFee: ['平台费', '平台服务费'],
-  laborFee: ['人工费', '包装人工', '包装人工费'],
-  netProfit: ['净利润', '十一、净利润'],
-  netProfitRate: ['净利润率', '净利率'],
-  promoFeeRatio: ['推广费比', '费比'],
+  promoSpend: ['七、运营推广费用', '推广费', '推广费用', '广告费'],
+  platformFee: ['八、平台固定费用', '平台费', '平台服务费'],
+  laborFee: ['九、人工成本', '人工费', '包装人工', '包装人工费'],
+  netProfit: ['十二、净利润', '净利润', '十一、净利润'],
+  netProfitRate: ['十三、净利润率', '净利润率', '净利率'],
+  promoFeeRatio: ['十四、推广费比', '推广费比', '费比'],
   roi: ['ROI', '投入产出比'],
 };
 
@@ -118,9 +118,17 @@ export function normalizeShopExportRow(headers, row, date) {
 /** 解析 XLSX 行数组为店铺日报记录 */
 export function parseShopExportRows(rows, date) {
   if (!rows || rows.length < 2) return [];
-  const headers = rows[0];
+  // 找表头行: 第一行可能是标题信息,真正的表头是含"店铺名称"的行
+  let headerIdx = 0;
+  for (let i = 0; i < Math.min(5, rows.length); i++) {
+    if (rows[i].some(c => String(c).includes('店铺名称'))) {
+      headerIdx = i;
+      break;
+    }
+  }
+  const headers = rows[headerIdx];
   const records = [];
-  for (let i = 1; i < rows.length; i++) {
+  for (let i = headerIdx + 1; i < rows.length; i++) {
     const record = normalizeShopExportRow(headers, rows[i], date);
     if (record) records.push(record);
   }
