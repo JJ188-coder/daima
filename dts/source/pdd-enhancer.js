@@ -1893,6 +1893,16 @@ async function getPromoDataByWindow(window) {
     setupStorageListener();
     if (document.body) setupMmsObserver();
     else document.addEventListener('DOMContentLoaded', setupMmsObserver);
+    // 页面加载完成后立即尝试注入(解决第一次刷新看不到浮窗的问题)
+    if (document.readyState === 'complete') {
+      setTimeout(tryInject, 500);
+      setTimeout(tryInject, 2000);
+    } else {
+      window.addEventListener('load', () => {
+        setTimeout(tryInject, 500);
+        setTimeout(tryInject, 2000);
+      });
+    }
     setTimeout(tryInject, 3000);
     setTimeout(tryInject, 8000);
     setTimeout(tryInject, 15000);
