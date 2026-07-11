@@ -5,10 +5,11 @@ import { extractTaskCreatedAt, isExpectedExportTask, validateExportRows } from '
 
 test('accepts only the requested report task after this export began', () => {
   const criteria = { kind: 'shop', targetDate: '2026-07-09', after: 1_000 };
-  assert.equal(isExpectedExportTask({ text: '店铺多维度利润分析 2026-07-09', createdAt: 1_001 }, criteria), true);
-  assert.equal(isExpectedExportTask({ text: '商品排名导出 2026-07-09', createdAt: 1_001 }, criteria), false);
-  assert.equal(isExpectedExportTask({ text: '店铺多维度利润分析 2026-07-08', createdAt: 1_001 }, criteria), false);
-  assert.equal(isExpectedExportTask({ text: '店铺多维度利润分析 2026-07-09', createdAt: 999 }, criteria), false);
+  // 下载中心任务文本包含"待下载"状态,不含目标日期(文件名用时间戳)
+  assert.equal(isExpectedExportTask({ text: '店铺多维度分析20260709102130 待下载', createdAt: 1_001 }, criteria), true);
+  assert.equal(isExpectedExportTask({ text: '商品排名导出 2026-07-09 待下载', createdAt: 1_001 }, criteria), false);
+  assert.equal(isExpectedExportTask({ text: '店铺多维度分析20260708102130 待下载', createdAt: 1_001 }, criteria), true);
+  assert.equal(isExpectedExportTask({ text: '店铺多维度分析20260709102130 待下载', createdAt: 999 }, criteria), false);
 });
 
 test('extracts a task creation timestamp and rejects tasks without one', () => {

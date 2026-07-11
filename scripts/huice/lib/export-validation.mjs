@@ -16,7 +16,11 @@ export function isExpectedExportTask(task, { kind, targetDate, after }) {
   const text = String(task?.text || '');
   const hasKind = (KIND_MARKERS[kind] || []).some(marker => text.includes(marker));
   const createdAt = task?.createdAt ?? extractTaskCreatedAt(text);
-  return hasKind && text.includes(targetDate) && Number.isFinite(createdAt) && createdAt >= Number(after);
+  // 只校验任务类型+创建时间,不校验任务文本里的 targetDate
+  // (下载中心任务名是"店铺多维度分析+时间戳",不含目标日期)
+  // 状态必须是"待下载"或"可下载"
+  const isReady = text.includes('待下载') || text.includes('可下载') || text.includes('已下载');
+  return hasKind && Number.isFinite(createdAt) && createdAt >= Number(after) && isReady;
 }
 
 export function validateExportRows(rows, { kind, targetDate }) {
