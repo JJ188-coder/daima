@@ -88,12 +88,25 @@ async function cdpEval(ws, expression) {
   return res.result?.result?.value;
 }
 
-/** 关闭弹窗（"我知道了"等） */
+/** 关闭弹窗（"我知道了" + 所有遮挡弹窗 + 遮罩层） */
 async function closePopups(ws) {
   await cdpEval(ws, `(() => {
+    // 1. 关闭所有通知按钮
     document.querySelectorAll('button, .el-button').forEach(el => {
-      const t = (el.innerText || '').trim();
-      if (['我知道了', '300S后关闭', '确定', '关闭'].includes(t) && el.offsetParent !== null) el.click();
+      const t = (el.innerText || '').trim().replace(/\\s/g, '');
+      if (['我知道了', '300S后关闭', '确定', '关闭', '取消'].includes(t) && el.offsetParent !== null) el.click();
+    });
+    // 2. 点击遮罩层关闭弹窗(v-modal / el-overlay)
+    document.querySelectorAll('.v-modal, .el-overlay, .el-dialog__wrapper').forEach(el => {
+      if (el.offsetParent !== null) el.click();
+    });
+    // 3. 关闭通知容器(直接移除 DOM)
+    document.querySelectorAll('.el-notification, .el-message-box, .el-dialog__wrapper').forEach(el => {
+      if (el.offsetParent !== null) {
+        // 先尝试点关闭按钮
+        const closeBtn = el.querySelector('.el-icon-close, .el-dialog__close, [aria-label="Close"]');
+        if (closeBtn) closeBtn.click();
+      }
     });
     return 'ok';
   })()`);
@@ -391,17 +404,10 @@ async function downloadFromCenter(ws, targetDate, exportRequestedAt) {
   await cdpEval(ws, `location.href = "${DOWNLOAD_CENTER_URL}"`);
   await sleep(3000);
 
-  // 先关掉所有"我知道了"通知(通知太多会挡住 AG-Grid 的下载按钮)
-  for (let i = 0; i < 5; i++) {
-    const n = await cdpEval(ws, `(() => {
-      const btns = [...document.querySelectorAll('button')].filter(b => b.offsetParent !== null);
-      let count = 0;
-      for (const b of btns) { if ((b.innerText||'').includes('我知道了')) { b.click(); count++; } }
-      return count;
-    })()`);
-    if (n === 0) break;
-    await sleep(500);
-  }
+  // 关闭残留弹窗(等几秒自动消失,但残留多时需要手动关)
+  await closePopups(ws);
+  await sleep(3000);  // 等残留通知自动消失
+  await closePopups(ws);
 
   // 点"查询"让 AG-Grid 加载数据
   await cdpEval(ws, `(() => { const btn = [...document.querySelectorAll('button')].find(b => (b.innerText||'').trim() === '查询'); if (btn) btn.click(); return 'ok'; })()`);
@@ -412,8 +418,15 @@ async function downloadFromCenter(ws, targetDate, exportRequestedAt) {
   // 轮询等 AG-Grid 行加载 + 找下载按钮
   let result = null;
   for (let attempt = 0; attempt < 20; attempt++) {
-    // 每轮先关通知
-    await cdpEval(ws, `(() => { [...document.querySelectorAll('button')].forEach(b => { if ((b.innerText||'').includes('我知道了')) b.click(); }); return 'ok'; })()`);
+    // 每轮先关所有弹窗+通知+遮罩
+    await cdpEval(ws, `(() => {
+      document.querySelectorAll('button, .el-button').forEach(b => {
+        const t = (b.innerText || '').trim().replace(/\\s/g, '');
+        if (['我知道了', '300S后关闭', '确定', '关闭', '取消'].includes(t) && b.offsetParent !== null) b.click();
+      });
+      document.querySelectorAll('.v-modal, .el-overlay').forEach(el => { if (el.offsetParent !== null) el.click(); });
+      return 'ok';
+    })()`);
 
     const tasks = await cdpEval(ws, `(() =>
       [...document.querySelectorAll('.ag-row')].map(row => ({
