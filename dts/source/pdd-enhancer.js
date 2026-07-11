@@ -1428,10 +1428,20 @@ async function getPromoDataByWindow(window) {
   /** 逐页收录已命中慧经营记录,完成后恢复原页 */
   async function collectMatchedReportRecords(dialog, huiceMap) {
     const initial = getDialogPageData(dialog, huiceMap);
+    if (!initial) return { ok: false, reason: 'renderData unavailable' };
+    
     const pager = dialog.querySelector('.el-pagination');
     const next = pager?.querySelector('.btn-next');
     const previous = pager?.querySelector('.btn-prev');
-    if (!initial || !pager || !next || !previous) return { ok: false, reason: 'pager or renderData unavailable' };
+    
+    // 没有分页器(单页): 直接返回当前页数据
+    if (!pager || !next || !previous) {
+      const scannedProductIds = new Set();
+      const matchedRecords = new Map();
+      initial.scannedProductIds.forEach(id => scannedProductIds.add(id));
+      initial.matchedRecords.forEach((record, id) => matchedRecords.set(id, record));
+      return { ok: true, scannedProductIds, matchedRecords, pageCount: 1 };
+    }
 
     const originalPage = Number(pager.querySelector('.el-pager .number.active')?.textContent || 1);
     const scannedProductIds = new Set();

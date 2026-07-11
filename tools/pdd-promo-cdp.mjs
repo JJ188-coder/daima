@@ -16,8 +16,7 @@
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import Database from 'better-sqlite3';
-import { upsertPddPromoDaily } from '../scripts/huice/lib/db.mjs';
+import { upsertPddPromoDaily, getPddShopMapping } from '../scripts/huice/lib/db.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -35,7 +34,7 @@ for (let i = 0; i < args.length; i++) {
 function dateStr(offset = 0) {
   const d = new Date();
   d.setDate(d.getDate() + offset);
-  return d.toISOString().slice(0, 10);
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -160,33 +159,31 @@ async function readPromoData(ws) {
   return result ? JSON.parse(result) : null;
 }
 
-/** 写入 pdd_promo_daily 独立表(不覆盖 shop_daily_profit) */
-function updatePromoSpend(date, promoData) {
-  if (!existsSync(DB_PATH)) return false;
-  const db = new Database(DB_PATH);
+/** 从页面提取 mallId(通过 __NEXT_DATA__) */
+async function readMallId(ws) {
+  const mallId = await cdpEval(ws, `(() => {
+    try {
+      const mallId = window.__NEXT_DATA__?.props?.__ANQ_MODELS_INIT_STATE__?.CommonGlobalConfig?.mallId;
+      return mallId ? Number(mallId) : 0;
+    } catch(e) { return 0; }
+  })()`);
+  return mallId || 0;
+}
 
-  const pddShopName = promoData.shopName || '';
-  let shopRow = null;
-  if (pddShopName) {
-    const cleaned = pddShopName.replace(/(食品|零食|专营|旗舰|专卖|官方|总动员|大卖场|卖场|专营店|旗舰店|专卖店|店|铺)/g, '').trim();
-    const keyword = cleaned.slice(0, 2);
-    if (keyword) {
-      shopRow = db.prepare("SELECT shop_id, huice_name FROM shops WHERE huice_name LIKE ? AND huice_name LIKE '拼%' ORDER BY LENGTH(huice_name) ASC LIMIT 1").get('%' + keyword + '%');
-    }
-  }
+/** 通过 mallId 映射查 huice_shop_id,写入 pdd_promo_daily 独立表 */
+function updatePromoSpend(date, promoData, mallId) {
+  if (!mallId) return false;
 
-  if (!shopRow) { db.close(); return false; }
+  const mapping = getPddShopMapping(mallId);
+  if (!mapping) return false;
 
-  // 写入独立的 pdd_promo_daily 表,不碰 shop_daily_profit
   upsertPddPromoDaily({
-    shopId: shopRow.shop_id,
+    shopId: mapping.huice_shop_id,
     date: date,
     promoSpend: promoData.promoSpend,
     roi: promoData.roi,
     gmv: promoData.gmv,
   });
-
-  db.close();
   return true;
 }
 
@@ -222,6 +219,23 @@ async function main() {
   const ws = new WebSocket(pddTab.webSocketDebuggerUrl);
   await new Promise((r, rej) => { ws.addEventListener('open', r, { once: true }); ws.addEventListener('error', rej, { once: true }); setTimeout(rej, 5000); });
   console.log(`✅ CDP 已连接`);
+
+  // 提取 mallId(用于映射到慧经营店铺)
+  const mallId = await readMallId(ws);
+  if (!mallId) {
+    console.error('❌ 无法从页面提取 mallId,退出');
+    ws.close();
+    process.exit(1);
+  }
+  console.log(`✅ mallId=${mallId}`);
+
+  const mapping = getPddShopMapping(mallId);
+  if (!mapping) {
+    console.error(`❌ mallId=${mallId} 在 pdd_shop_mapping 中没有映射,退出`);
+    ws.close();
+    process.exit(1);
+  }
+  console.log(`✅ 映射到慧经营店铺: shopId=${mapping.huice_shop_id} name=${mapping.pdd_shop_name}`);
 
   const failedDates = [];
 
@@ -273,9 +287,9 @@ async function main() {
     console.log(`  📊 推广费=¥${promo.promoSpend} 交易额=¥${promo.gmv} ROI=${promo.roi} 店铺=${promo.shopName}`);
 
     // 4. 入库
-    const updated = updatePromoSpend(targetDate, promo);
+    const updated = updatePromoSpend(targetDate, promo, mallId);
     if (updated) {
-      console.log(`  ✅ 已更新 shop_daily_profit`);
+      console.log(`  ✅ 已更新 pdd_promo_daily`);
     } else {
       console.log(`  ⚠️ 未匹配到慧经营店铺,跳过`);
     }
@@ -288,4 +302,4 @@ async function main() {
   }
 }
 
-main().catch(e => { console.error('❌', e.message); process.exit(1); });
+main().then(() => { process.exit(0); }).catch(e => { console.error("❌", e.message); process.exit(1); });
