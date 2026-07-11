@@ -165,10 +165,10 @@ async function readMallId(ws) {
   const mallId = await cdpEval(ws, `(() => {
     try {
       const mallId = window.__NEXT_DATA__?.props?.__ANQ_MODELS_INIT_STATE__?.CommonGlobalConfig?.mallId;
-      return mallId ? Number(mallId) : 0;
-    } catch(e) { return 0; }
+      return mallId ? String(mallId) : '';
+    } catch(e) { return ''; }
   })()`);
-  return mallId || 0;
+  return mallId || '';
 }
 
 /** 通过 mallId 映射查 huice_shop_id,写入 pdd_promo_daily 独立表 */
