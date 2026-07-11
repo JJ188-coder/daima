@@ -1,10 +1,10 @@
-# 店铺报表按日期利润数据 Implementation Plan
+# 店铺报表真实店铺日报 V2 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在店透视浮窗的“店铺报表”里，按用户当前选择的日期范围，逐日展示当前登录拼多多店铺的推广费用、ROI、保本 ROI、费比、净利润率和净利润额；这些指标优先使用慧经营“多维利润分析 > 更多店铺展示/按店铺展示”里已经核算好的真实店铺费用和真实净利。
+**Goal:** 在店透视浮窗的“店铺报表”里，按用户当前选择的日期范围，逐日展示当前登录拼多多店铺的推广费用、ROI、保本 ROI、费比、净利润率和净利润额；这些指标只使用慧经营“多维利润分析 > 更多店铺展示/按店铺展示”里已经核算好的真实店铺费用和真实净利。
 
-**Architecture:** 慧经营负责店铺级利润、推广费、人工费、平台费等真实费用口径，店透视浮窗只负责读取本地服务并展示。拼多多推广页只作为核对或慧经营字段缺失时的补充参考，不作为主计算口径。店铺映射不靠店名猜测，而是使用“当前商品列表里已经命中慧经营利润数据的商品 ID”反查它们在慧经营中的店铺；唯一候选自动绑定，多个候选进入待确认状态。
+**Architecture:** 以慧经营店铺维度导出作为唯一权威利润数据源，SQLite 分开保存“慧经营真实店铺日报”和“拼多多推广参考数据”，两者禁止互相覆盖。店透视浮窗使用 `mallId` 查询已确认映射，再读取慧经营日报；映射只使用当前商品列表中已命中慧经营数据的商品 ID 集合，绝不使用店名模糊匹配或“随便取第一家店”的回退逻辑。
 
 **Tech Stack:** Chrome MV3 extension、`dts/source/pdd-enhancer.js`、Node.js ESM、CDP Chrome、SQLite (`better-sqlite3`)、本地 HTTP 服务、慧经营店铺维度 XLSX 导出、拼多多推广页面现有 `queryEntityReport` 数据仅作可选校验。
 
@@ -27,6 +27,9 @@
 - 只收集商品列表里“已经能显示毛利率、净利率等慧经营数据”的商品 ID。不要把商品列表全部商品 ID 都扫一遍。
 - XLSX、SQLite、下载缓存、30 天回采数据和登录态只允许存在于已忽略的 `private/`、`output/`，不得提交。
 - HTTP 服务继续只监听 `127.0.0.1`。缺数、接口失败和映射不唯一都显示 `--` 或待确认状态，禁止用 0 猜测。
+- 本计划以最新 `origin/main` 为实施基线；截至本次审核，基线提交为 `d933b03`。实施者必须先更新 `main`，不得从旧计划分支直接继续写业务代码。
+- `shop_daily_profit` 只能由慧经营店铺导出写入。`tools/pdd-promo-cdp.mjs` 不得 `UPDATE shop_daily_profit`，拼多多推广数据必须进入独立参考表。
+- `GET /shop-profit` 必须以 `mallId` 的已确认映射为唯一入口。禁止根据 `pddShopName` 做 `LIKE`、截取前两个字、`LIMIT 1` 或日期范围内第一家拼多多店铺回退。
 
 ## 展示定义
 
@@ -41,17 +44,55 @@
 - 费比、净利润率显示两位百分比。
 - 慧经营真实净利润小于 0 时，整行标红，不只是净利润额标红。
 - 慧经营当天推广费为 0：推广费用 `¥0.00`、费比 `0.00%`、ROI `--`。
-- 慧经营当天缺少推广费字段：推广费用、ROI、费比显示 `--`，并保留原始行 JSON 供排查；只有用户确认后才允许用拼多多推广页补字段。
+- 慧经营当天缺少推广费字段：推广费用、ROI、费比显示 `--`，并保留原始行 JSON 供排查；当前任务不得用拼多多推广页静默补字段。
 - 慧经营当天无该店铺数据：净利润额、净利润率、保本 ROI、推广费用、ROI、费比均为 `--`。
 - 昨天显示 1 行，近 7 日显示 7 行，近 1 月显示完整日期范围内每日一行，自定义日期按实际起止日期显示。
 
 ## 当前代码事实
 
+- 最新 `main` 已经包含 `scripts/huice/lib/shop-profit.mjs`、`tools/huice-shop-export-cdp.mjs`、`shop_daily_profit`、`pdd_shop_mapping` 和店铺报表面板。因此下面各任务是修复和加固现有实现，不是重新创建同名模块。
 - `dts/source/pdd-enhancer.js` 目前已经有商品利润列、店铺汇总列、商品 ID 抽取、慧经营数据读取、拼多多推广数据读取等逻辑。新功能优先复用商品 ID 抽取和本地服务读取能力，不要另写一套页面探测。
 - 当前源码里没有稳定的“店铺报表”字符串和唯一页签 key。页面截图里用户叫它“店铺报表”，源码里此前很多逻辑实际插到了通用弹窗表格。必须先确认运行时页签标识，再动 UI。
 - `tools/huice-export-cdp.mjs` 已有商品维度的日期切换、查询、下载中心、失败日期机制。店铺维度导出可以复用思路，但不能把店铺数据写进商品表。
-- `scripts/huice/lib/db.mjs` 已有商品利润相关表。新功能必须新增独立店铺日表和店铺映射表，旧表保持兼容。店铺日表保存慧经营真实字段，不保存估算后的“调整净利”。
+- `scripts/huice/lib/db.mjs` 已有商品利润、店铺日报和店铺映射相关表。本次要保持旧表兼容，并新增独立的拼多多推广参考表。店铺日表只保存慧经营真实字段，不保存估算后的“调整净利”。
 - 过去已经出现过主仓库误包含 30 天回采数据的问题。之后所有真实数据文件必须被 `.gitignore` 挡住，并在提交前用 `git status --ignored` 检查。
+
+## 最新 main 审核发现（必须先修）
+
+以下问题来自对 `origin/main@d933b03` 的完整代码审核。现有 15 项测试虽然通过，但实际上只覆盖 3 个纯函数模块，没有覆盖 SQLite、本地 HTTP 服务、两个下载器、安装脚本和浮窗运行流程。以下任一 P0/P1 未修复，都不能认为本功能完成。
+
+1. **P0：店铺可能匹配错。** `dts/source/pdd-enhancer.js` 当前请求 `/shop-profit` 时只传 `pddShopName`；`tools/huice-server.mjs` 会截取店名片段后用 `LIKE ... LIMIT 1`，失败时还会取日期范围内第一家拼多多店铺。这会把甲店利润展示到乙店。
+2. **P0：拼多多推广费覆盖了慧经营真实字段。** `tools/pdd-promo-cdp.mjs` 当前直接更新 `shop_daily_profit.promo_spend/roi`，服务端再用被覆盖后的值重算费比和 ROI。这违反“新增整店铺数据以慧经营真实费用为准”的确认口径。
+3. **P1：下载中心可能拿错文件。** `tools/huice-shop-export-cdp.mjs` 当前倾向点击第一条可下载记录，并主要用日期复核。若下载中心同时存在同一天的商品报表或旧店铺报表，可能导入错误文件。
+4. **P1：UI 范围保护和回归测试不足。** 当前主要依赖弹窗标题包含“店铺报表”。必须补充唯一页签/根节点判断，并测试商品列表和另外 3 个页签不会被写入。
+5. **P0：Excel 数值型百分比会缩小 100 倍。** `openpyxl` 可能把 Excel 的 12.5% 读成数值 `0.125`，现有 `toPercent()` 和商品导出器仍无条件除以 100，结果会变成 `0.00125`，保本 ROI 会从 8 变成 800。
+6. **P0：商品和店铺下载都可能把错误文件写进目标日期。** 商品下载器直接取下载中心第一行且不校验文件日期；店铺下载器点击第一个“下载”。必须同时校验任务类型、请求时间、状态、工作簿表头和日期。
+7. **P1：本地服务可被任意网页读取。** 当前返回 `Access-Control-Allow-Origin: *`，访问任意恶意网页时都可能被读取本地经营数据；同时允许方法只有 `GET, OPTIONS`，实际 `POST /shop-mapping/*` 的浏览器预检会失败。
+8. **P1：相同日期切换店铺可能残留上一家数据。** 店铺日报面板的幂等 key 只有日期范围，没有 `mallId`；异步请求也没有取消或请求序号，慢请求可能把甲店结果写到乙店面板。
+9. **P1：单页商品报表可能无法汇总。** `collectMatchedReportRecords()` 要求分页器、上一页和下一页全部存在；只有一页且没有分页器时会直接失败。
+10. **P1：多日店铺采集只在第一天选店铺。** 每天都会从下载中心返回慧经营页面，但代码只在 `i === 0` 时筛选“拼”并全选；筛选失败也只打印日志继续执行，可能混入其他平台店铺。
+11. **P1：失败会被误报成功。** XLSX 解析 0 行、SQLite 入库失败、下载按钮没找到等情况没有统一写入失败日期或返回非零退出码，定时任务可能继续使用旧数据。
+12. **P1：Windows 和新机器部署不完整。** Windows 每日任务没有店铺采集，服务计划任务使用了新进程里不存在的 `$SCRIPT_DIR`；安装脚本也没有验证 `python3 + openpyxl`。
+13. **P2：日期、CDP 和 HTML 仍有稳定性问题。** 多处用 UTC `toISOString()` 计算中国自然日；CDP 成功后 timeout 未清理；店铺名和错误消息直接拼入 `innerHTML`。
+
+修复后的不可退让结果：
+
+```text
+mallId -> confirmed pdd_shop_mapping -> huice_shop_id -> shop_daily_profit
+```
+
+任何情况下都不能走：
+
+```text
+pddShopName 模糊匹配 -> LIMIT 1
+没有映射 -> 日期范围内第一家店
+PDD 推广采集 -> UPDATE shop_daily_profit
+下载中心 -> 第一条“下载”
+Excel 数值 0.125 -> 再除以 100
+只按日期复用店铺面板
+任意 Origin -> 读取本地利润接口
+采集失败 -> 仍以退出码 0 结束
+```
 
 ## 这次已经踩过的坑
 
@@ -78,6 +119,13 @@
 19. **XLSX 不能按固定列号读。** 慧经营表头很宽，列顺序会变。必须按表头名解析，并保留脱敏 fixture。
 20. **CDP 调用要清理 timeout。** 如果 `Runtime.evaluate` 成功后没有 `clearTimeout`，脚本可能看似结束但进程仍挂着。
 21. **先跑单日，再跑 30 天。** 不能一上来回采 30 天；必须先用昨天一日验证下载、解析、入库、展示全链路。
+22. **百分比必须区分显示值和底层值。** `"12.5%"`、`12.5` 和 Excel 数值 `0.125` 都可能表示 12.5%；解析时必须结合是否带 `%`、数值范围或单元格格式，不能统一除以 100。
+23. **单页不能依赖分页器。** 没有分页器时，当前页就是完整结果，应直接返回成功。
+24. **面板 key 必须包含店铺。** 至少使用 `mallId + start + end`；切店铺时取消旧请求或丢弃过期响应。
+25. **每个采集日期都要重新确认店铺筛选。** 不依赖上一天页面状态；筛选、全选、确认任一步失败都停止当天采集。
+26. **本地监听不等于浏览器数据安全。** `127.0.0.1` 仍可被网页跨域请求，必须限制 Origin、允许正确的 POST 预检，并限制请求体和日期范围。
+27. **业务日期不能用 UTC 截断。** 所有“昨天/近 7 日/近 30 日”用本地年月日格式化，避免中国时间凌晨 0:00-08:00 错一天。
+28. **成功必须有完整证据。** 正确文件、非空有效记录、SQLite 事务成功缺一不可；否则写失败日期并返回非零退出码。
 
 ## 数据流
 
@@ -102,7 +150,7 @@
   -> 读取当前日期选项
   -> GET /shop-profit?mallId=...&start=...&end=...
   -> 本地服务返回慧经营真实店铺费用和真实净利
-  -> 必要时用拼多多推广页做人工核对，不作为默认主口径
+  -> 拼多多推广参考数据只做独立人工核对，不参与返回值
   -> 店铺报表逐日展示
 ```
 
@@ -110,27 +158,36 @@
 
 | 文件 | 责任 |
 | --- | --- |
-| `scripts/huice/lib/shop-profit.mjs` | 新建。纯函数：日期范围、XLSX 店铺行解析、真实费用字段规范化、店铺指标计算、映射候选、展示行格式化。 |
-| `scripts/huice/lib/db.mjs` | 新增 `shop_daily_profit`、`pdd_shop_mapping` 表和查询/upsert API。 |
-| `tools/huice-shop-export-cdp.mjs` | 新建。控制慧经营页面，按日下载全部拼多多店铺数据，选择“不分店铺下载”，解析并入库。 |
-| `tools/huice-server.mjs` | 新增店铺利润查询、店铺映射候选、人工确认映射接口。 |
+| `scripts/huice/lib/shop-profit.mjs` | 修改。保留纯计算，确保全部展示指标以慧经营字段为准。 |
+| `scripts/huice/lib/db.mjs` | 修改。保留 `shop_daily_profit`、`pdd_shop_mapping`，新增独立 `pdd_shop_promo_daily` 参考表及查询/upsert API。 |
+| `tools/huice-shop-export-cdp.mjs` | 修改。精确选择本次“店铺多维度分析”下载任务，再解析入库。 |
+| `tools/pdd-promo-cdp.mjs` | 修改。停止覆盖 `shop_daily_profit`，只写拼多多推广参考表。 |
+| `tools/huice-server.mjs` | 修改。`/shop-profit` 只接受 `mallId` 映射查询；删除店名模糊匹配和第一家店回退。 |
 | `scripts/huice-daily.sh` | macOS 每日同步中加入店铺日导出。 |
 | `scripts/huice-daily.ps1` | Windows 每日同步中加入店铺日导出。 |
+| `install.sh` / `install.ps1` | 创建项目私有 Python 环境并验证 `openpyxl`；安装正确的每日任务。 |
+| `scripts/start-huice-server.ps1` | 新建。使用确定项目路径启动 Windows 本地服务。 |
+| `scripts/start-cdp-chrome.ps1` | 修复 Windows 日志重定向和启动验证。 |
+| `scripts/huice/lib/date.mjs` | 新建。Node 采集工具共用中国本地自然日计算。 |
 | `dts/source/pdd-enhancer.js` | 只在店铺报表页签读取日期范围并渲染逐日店铺数据；商品列表和其他页签不动。 |
-| `test/shop-profit.test.mjs` | 新建。单元测试纯计算、解析和映射。 |
-| `test/huice-shop-export.test.mjs` | 新建。测试慧经营选择器字符串、表头解析和合计行过滤。 |
-| `test/huice-server-shop-profit.test.mjs` | 新建。临时 SQLite 测本地服务查询和映射状态。 |
+| `test/shop-profit.test.mjs` | 修改。补充真实费用优先、缺失值、亏损与比例计算测试。 |
+| `test/shop-profit-db.test.mjs` | 新建。证明拼多多推广参考写入不会改变慧经营日报。 |
+| `test/huice-shop-export.test.mjs` | 新建。测试选择器、下载任务精确匹配和错误文件拒绝。 |
+| `test/huice-server-shop-profit.test.mjs` | 新建。临时 SQLite 测 `mallId` 查询、映射状态和禁止回退。 |
+| `test/huice-export-parser.test.mjs` | 新建。测试商品/店铺百分比、工作簿日期和错误文件拒绝。 |
+| `test/date-utils.test.mjs` | 新建。覆盖中国时间凌晨的昨天/日期范围计算。 |
+| `README.md` | 修正数据来源和自动任务说明，避免继续宣称拼多多推广费覆盖慧经营。 |
 | `docs/OPERATIONS.md` | 追加店铺回采、补采、排错命令，不写真实数据。 |
 
 ---
 
-## Task 0: 停止半成品执行并建立审核分支
+## Task 0: 从最新 main 建立干净实施分支
 
 **Files:**
 - Modify: none
 
 **Interfaces:**
-- Produces: 一个只包含计划或后续实现提交的干净分支。
+- Produces: 一个从最新 `origin/main` 创建、只包含本次修复的干净分支。
 
 - [ ] **Step 1: 确认没有下载脚本还在跑**
 
@@ -148,22 +205,41 @@ Expected: 只出现本次 `rg` 命令，不能有 `node tools/huice-shop-export-
 kill <pid>
 ```
 
-- [ ] **Step 2: 确认当前不在 `main` 上改代码**
+- [ ] **Step 2: 更新本地 main**
 
 Run:
 
 ```bash
-git status --short --branch
+git status --short
+git fetch origin
+git switch main
+git pull --ff-only origin main
 ```
 
-Expected: 当前分支是 `codex/...`，不是 `main`。如果在 `main`：
+Expected: 工作区干净，`main` 与 `origin/main` 一致。若 `git status --short` 有用户未提交内容，立即停止，不要 stash、reset 或覆盖。
+
+- [ ] **Step 3: 创建并提前推送实施分支**
+
+Run:
 
 ```bash
-git switch -c codex/2026-07-10-shop-report-daily
+git switch -c codex/2026-07-10-shop-report-real-huice-v2
 git push -u origin HEAD
 ```
 
-- [ ] **Step 3: 确认真实数据不会入 Git**
+Expected: 后续所有业务代码提交都进入该分支，不直接写 `main`，也不在旧的计划分支上开发。
+
+- [ ] **Step 4: 记录实施基线**
+
+Run:
+
+```bash
+git log -1 --oneline --decorate
+```
+
+Expected: 能记录朋友实际开始实施时的最新 `main` 提交。若已晚于 `d933b03`，先重新检查本文“最新 main 审核发现”是否仍存在，再按实际代码调整行号，业务约束不变。
+
+- [ ] **Step 5: 确认真实数据不会入 Git**
 
 Run:
 
@@ -173,7 +249,7 @@ git status --ignored --short private output | sed -n '1,80p'
 
 Expected: `private/`、`output/` 下真实数据只出现在 `!!` 忽略项里，不出现在 `??` 或 `M`。
 
-- [ ] **Step 4: 本任务提交策略**
+- [ ] **Step 6: 本任务提交策略**
 
 每个任务一个提交。不要把真实 XLSX、SQLite、下载缓存、登录态放入提交。
 
@@ -290,10 +366,13 @@ git commit -m "refactor(report): scope store report context"
 ## Task 2: 建立店铺真实日报解析和数据库模型
 
 **Files:**
-- Create: `scripts/huice/lib/shop-profit.mjs`
+- Modify: `scripts/huice/lib/shop-profit.mjs`
 - Modify: `scripts/huice/lib/db.mjs`
-- Create: `test/shop-profit.test.mjs`
+- Modify: `tools/pdd-promo-cdp.mjs`
+- Modify: `tools/huice-export-cdp.mjs`
+- Modify: `test/shop-profit.test.mjs`
 - Create: `test/shop-profit-db.test.mjs`
+- Create: `test/huice-export-parser.test.mjs`
 
 **Interfaces:**
 - `normalizeShopExportRow(headers, row, date) -> HuiceShopDailyRecord | null`
@@ -311,6 +390,7 @@ import assert from 'node:assert/strict';
 import {
   buildStoreReportDay,
   parseShopExportRows,
+  toPercent,
 } from '../scripts/huice/lib/shop-profit.mjs';
 
 test('uses Huice real shop net profit without product-level estimated deductions', () => {
@@ -357,6 +437,23 @@ test('parses Huice shop export rows by real header names and skips total rows', 
   assert.equal(parsed[0].netProfit, 125);
   assert.equal(parsed[0].netProfitRate, 0.125);
 });
+
+test('normalizes formatted and numeric Excel percentages without dividing twice', () => {
+  assert.equal(toPercent('12.50%'), 0.125);
+  assert.equal(toPercent(0.125), 0.125);
+  assert.equal(toPercent('0.125'), 0.125);
+  assert.equal(toPercent(12.5), 0.125);
+});
+
+test('keeps break-even ROI at 8 when Excel stores 12.5% as 0.125', () => {
+  const [parsed] = parseShopExportRows([
+    ['店铺名称', '一、销售收入', '七、运营推广费用', '十二、净利润', '十三、净利润率'],
+    ['拼【周贝瑞', 1000, 80, 125, 0.125],
+  ], '2026-07-09');
+  const day = buildStoreReportDay({ date: parsed.date, shop: parsed });
+  assert.equal(parsed.netProfitRate, 0.125);
+  assert.equal(day.breakEvenRoi, 8);
+});
 ```
 
 Run:
@@ -365,7 +462,7 @@ Run:
 npm test -- test/shop-profit.test.mjs
 ```
 
-Expected: FAIL because new functions do not exist.
+Expected: 新增的数值型百分比测试 FAIL；基线会把 `0.125` 解析成 `0.00125`，保本 ROI 得到 `800`。已有真实费用和亏损测试应继续 PASS。
 
 - [ ] **Step 2: 实现真实店铺指标函数**
 
@@ -377,6 +474,15 @@ export function toNumber(value) {
   const normalized = String(value).replace(/[,%¥,\s]/g, '');
   const parsed = Number(normalized);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function toPercent(value) {
+  if (value == null || value === '' || value === '--') return null;
+  const text = String(value).trim();
+  const number = Number(text.replace(/[,%\s]/g, ''));
+  if (!Number.isFinite(number)) return null;
+  if (text.includes('%')) return number / 100;
+  return Math.abs(number) <= 1 ? number : number / 100;
 }
 
 export function buildStoreReportDay({ date, shop }) {
@@ -463,16 +569,54 @@ const SHOP_EXPORT_HEADERS = {
 解析规则：
 
 ```text
-1. 第一行必须当表头。
+1. 在前 20 行中寻找包含精确“店铺名称”的表头；找不到必须报错，不能默认拿第一行。
 2. 通过表头文字找列号，不能用固定列号。
 3. 店铺名为空、店铺名为“合计”的行跳过。
 4. `netProfit` 缺失时整行保留，但净利润额显示 `--`。
 5. `promoSpend` 缺失时推广费用、ROI、费比显示 `--`，不能自动改用拼多多推广页，除非用户单独确认。
 6. 所有未显式建列的慧经营费用字段放进 `metricsJson`，`rawRowJson` 保存原始行，方便后续查错。
 7. 这些规则只作用于新增店铺日报数据，不影响商品级利润解析和商品列表真列。
+8. `"12.5%"`、`12.5`、`0.125` 都要规范化成 `0.125`；测试必须覆盖三种输入。
 ```
 
+- [ ] **Step 4A: 修复商品导出器的相同百分比错误**
+
+`tools/huice-export-cdp.mjs` 目前 Python 内嵌函数 `pp(v)` 对任何数字都 `/100`。把 XLSX 读取结果改成保留原始数值类型和 `number_format`，或把解析逻辑抽成可测试的 JS 函数；不得继续按固定的“所有百分比都除 100”处理。
+
+在 `test/huice-export-parser.test.mjs` 写：
+
+```js
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { normalizeExcelPercent } from '../tools/huice-export-cdp.mjs';
+
+test('normalizes product report percentage cells', () => {
+  assert.equal(normalizeExcelPercent({ value: 0.3191, numberFormat: '0.00%' }), 0.3191);
+  assert.equal(normalizeExcelPercent({ value: '31.91%', numberFormat: '' }), 0.3191);
+  assert.equal(normalizeExcelPercent({ value: 31.91, numberFormat: '' }), 0.3191);
+});
+```
+
+Run:
+
+```bash
+node --test test/shop-profit.test.mjs test/huice-export-parser.test.mjs
+```
+
+Expected: PASS，并确认商品净利润的 `1.15/单 + 2%` 旧公式没有被改动；这里只修复毛利率、退款率、原始净利率的读取。
+
 - [ ] **Step 5: 写 DB 测试**
+
+先让 `scripts/huice/lib/db.mjs` 支持测试数据库路径，同时保持生产默认值不变：
+
+```js
+const DEFAULT_DB_PATH = resolve(__dirname, 'private/huice-data.sqlite');
+const DB_PATH = process.env.HUICE_DB_PATH
+  ? resolve(process.env.HUICE_DB_PATH)
+  : DEFAULT_DB_PATH;
+```
+
+测试必须在首次 `import db.mjs` 之前设置 `HUICE_DB_PATH`，并在临时目录创建数据库；禁止单元测试触碰真实 `private/huice-data.sqlite`。
 
 在 `test/shop-profit-db.test.mjs` 使用临时 DB：
 
@@ -488,7 +632,7 @@ test('stores and reads shop daily profit by mall mapping', async () => {
   process.env.HUICE_DB_PATH = dbPath;
   const db = await import('../scripts/huice/lib/db.mjs');
 
-  db.upsertShop({ shopName: '拼【周贝瑞' });
+  db.upsertShop('拼【周贝瑞');
   const shop = db.findShopByName('拼【周贝瑞');
   db.upsertPddShopMapping({
     pddMallId: '123',
@@ -526,7 +670,7 @@ test('stores and reads shop daily profit by mall mapping', async () => {
 
 - [ ] **Step 6: 实现 DB 表**
 
-新增表：
+核对并迁移现有表（已有字段不得破坏）：
 
 ```sql
 CREATE TABLE IF NOT EXISTS shop_daily_profit (
@@ -561,17 +705,89 @@ CREATE TABLE IF NOT EXISTS pdd_shop_mapping (
   updated_at TEXT DEFAULT (datetime('now')),
   FOREIGN KEY (huice_shop_id) REFERENCES shops(shop_id)
 );
+
+CREATE TABLE IF NOT EXISTS pdd_shop_promo_daily (
+  pdd_mall_id TEXT NOT NULL,
+  date TEXT NOT NULL,
+  pdd_shop_name TEXT,
+  promo_spend REAL,
+  gmv REAL,
+  roi REAL,
+  raw_json TEXT,
+  captured_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (pdd_mall_id, date)
+);
 ```
 
 所有 SQL 使用占位符。不得拼接 `mallId`、`shopName`、日期字符串。
 
-旧的商品级 `daily_profit`、`product_profit` 字段和计算逻辑不改；新增字段只进 `shop_daily_profit`。
+旧的商品级 `daily_profit`、`product_profit` 字段和计算逻辑不改。慧经营真实店铺数据只进 `shop_daily_profit`；拼多多推广页采集结果只进 `pdd_shop_promo_daily`。
 
-- [ ] **Step 7: 提交**
+- [ ] **Step 7: 写“拼多多参考数据不得覆盖慧经营”失败测试**
+
+在 `test/shop-profit-db.test.mjs` 追加：
+
+```js
+test('keeps Huice shop promo spend authoritative when PDD reference is saved', async () => {
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'huice-source-')), 'data.sqlite');
+  process.env.HUICE_DB_PATH = dbPath;
+  const db = await import(`../scripts/huice/lib/db.mjs?case=${Date.now()}`);
+
+  const shop = db.upsertShop('拼【周贝瑞');
+  db.upsertShopDailyProfit({
+    shopId: shop.shop_id,
+    date: '2026-07-09',
+    salesAmount: 1000,
+    promoSpend: 80,
+    netProfit: 125,
+  });
+  db.upsertPddShopPromoDaily({
+    pddMallId: '123',
+    pddShopName: '周贝瑞食品专营店',
+    date: '2026-07-09',
+    promoSpend: 100,
+    gmv: 900,
+    roi: 9,
+  });
+
+  assert.equal(db.getShopDailyProfitRange(shop.shop_id, '2026-07-09', '2026-07-09')[0].promo_spend, 80);
+  assert.equal(db.getPddShopPromoDaily('123', '2026-07-09').promo_spend, 100);
+  db.closeDb();
+  delete process.env.HUICE_DB_PATH;
+});
+```
+
+Run:
 
 ```bash
-git add scripts/huice/lib/shop-profit.mjs scripts/huice/lib/db.mjs test/shop-profit.test.mjs test/shop-profit-db.test.mjs
-git commit -m "feat(profit): add shop daily profit model"
+node --test test/shop-profit-db.test.mjs
+```
+
+Expected: FAIL，因为独立参考表/API 尚未实现，或当前脚本仍覆盖权威表。
+
+- [ ] **Step 8: 隔离拼多多推广参考数据**
+
+在 `scripts/huice/lib/db.mjs` 实现 `upsertPddShopPromoDaily(record)` 和 `getPddShopPromoDaily(mallId, date)`。然后修改 `tools/pdd-promo-cdp.mjs`：
+
+```text
+删除/禁止：UPDATE shop_daily_profit SET promo_spend = ?, roi = ? ...
+改为：upsertPddShopPromoDaily({ pddMallId, pddShopName, date, promoSpend, gmv, roi, raw })
+```
+
+再次运行：
+
+```bash
+node --test test/shop-profit-db.test.mjs
+rg -n "UPDATE shop_daily_profit" tools/pdd-promo-cdp.mjs
+```
+
+Expected: 测试 PASS；`rg` 无输出。此任务完成后，拼多多数据即使为 `100`，慧经营权威值仍保持 `80`。
+
+- [ ] **Step 9: 提交**
+
+```bash
+git add scripts/huice/lib/shop-profit.mjs scripts/huice/lib/db.mjs tools/pdd-promo-cdp.mjs tools/huice-export-cdp.mjs test/shop-profit.test.mjs test/shop-profit-db.test.mjs test/huice-export-parser.test.mjs
+git commit -m "fix(shop-profit): keep Huice shop expenses authoritative"
 ```
 
 ---
@@ -579,7 +795,7 @@ git commit -m "feat(profit): add shop daily profit model"
 ## Task 3: 实现慧经营店铺日导出器
 
 **Files:**
-- Create: `tools/huice-shop-export-cdp.mjs`
+- Modify: `tools/huice-shop-export-cdp.mjs`
 - Create: `test/huice-shop-export.test.mjs`
 
 **Interfaces:**
@@ -602,7 +818,19 @@ CDP 连接
 下载文件归档到 output/
 ```
 
-不要直接改商品导出器。店铺导出器单独建文件，避免破坏现有每日商品采集。
+不要把店铺页面选择和店铺入库流程塞进商品导出器。店铺导出器保持独立；只允许在商品导出器中同步修复本次审核确认的共性错误：百分比解析、下载任务识别、日期校验、失败退出和 CDP timeout。
+
+两个导出器都要增加“直接执行才运行 main”的入口保护，否则单元测试 `import` 时会立刻连接 CDP：
+
+```js
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  main().catch((error) => {
+    console.error('采集失败:', error.message);
+    process.exitCode = 1;
+  });
+}
+```
 
 - [ ] **Step 2: 写 selector 测试**
 
@@ -614,6 +842,7 @@ import assert from 'node:assert/strict';
 import {
   HUICE_SHOP_SELECTORS,
   buildShopExportArgs,
+  pickShopDownloadTask,
 } from '../tools/huice-shop-export-cdp.mjs';
 
 test('uses the real shop search input and export icon selectors', () => {
@@ -626,7 +855,27 @@ test('uses the real shop search input and export icon selectors', () => {
 });
 
 test('builds explicit date args before running export', () => {
-  assert.deepEqual(buildShopExportArgs({ dates: '2026-07-09' }).dates, ['2026-07-09']);
+  assert.deepEqual(buildShopExportArgs({ dates: ['2026-07-09'] }).dates, ['2026-07-09']);
+});
+
+test('selects only the completed shop report created by this request', () => {
+  const requestedAt = new Date('2026-07-10T14:00:00+08:00').getTime();
+  const tasks = [
+    { name: '商品利润分析_2026-07-09', createdAt: '2026-07-10 14:01:00', status: '完成' },
+    { name: '店铺多维度分析_2026-07-09', createdAt: '2026-07-10 13:50:00', status: '完成' },
+    { name: '店铺多维度分析_2026-07-09', createdAt: '2026-07-10 14:02:00', status: '生成中' },
+    { name: '店铺多维度分析_2026-07-09', createdAt: '2026-07-10 14:03:00', status: '完成', id: 'correct' },
+  ];
+
+  assert.equal(pickShopDownloadTask(tasks, { requestedAt }).id, 'correct');
+});
+
+test('returns null instead of downloading the wrong report', () => {
+  const requestedAt = new Date('2026-07-10T14:00:00+08:00').getTime();
+  const tasks = [
+    { name: '商品利润分析_2026-07-09', createdAt: '2026-07-10 14:01:00', status: '完成' },
+  ];
+  assert.equal(pickShopDownloadTask(tasks, { requestedAt }), null);
 });
 ```
 
@@ -668,6 +917,8 @@ document.querySelector('#tab-DIM')?.click();
 点击弹层 `.confirm`
 ```
 
+以上流程必须在**每一个目标日期**查询前执行，不允许只在 `i === 0` 时执行。进入页面后先对搜索框执行 `focus -> select -> Backspace/Delete` 多次并派发 `input`，再输入“拼”，兼容页面保留上一次搜索文字的情况。
+
 关键等待表达式：
 
 ```js
@@ -678,6 +929,8 @@ document.querySelector('#tab-DIM')?.click();
   return names.length > 0 && names.every((name) => name.startsWith('拼'));
 })()
 ```
+
+等待结束后若结果不是 `ok`、找不到“全部”、确认失败，或确认后已选店铺数为 0，必须 `throw new Error(...)` 并把当天写入 `failedDates`。禁止仅打印日志后继续下载。
 
 - [ ] **Step 5: 单日查询**
 
@@ -728,6 +981,8 @@ function clickDialogButtonByText(dialogText, buttonText) {
 }
 ```
 
+每次点击后都要验证弹窗状态发生变化；如果“是否分店铺下载”仍可见，或没有成功选中“否”，当天立即失败。禁止用页面第一个可见“确定”作为兜底。
+
 - [ ] **Step 7: 下载中心匹配本次文件**
 
 跳转到下载中心后，只下载符合全部条件的文件：
@@ -741,6 +996,52 @@ function clickDialogButtonByText(dialogText, buttonText) {
 
 如果一页找不到，等待并刷新，不要下载旧文件。
 
+实现 `pickShopDownloadTask(tasks, { requestedAt })` 时必须同时满足：
+
+```js
+export function pickShopDownloadTask(tasks, { requestedAt }) {
+  return tasks
+    .filter((task) => /店铺多维度分析/.test(task.name || task.taskName || ''))
+    .filter((task) => parseHuiceTime(task.createdAt) >= requestedAt - 60_000)
+    .filter((task) => /完成|可下载/.test(task.status || ''))
+    .filter((task) => !/分店铺|压缩包|zip/i.test(`${task.name || ''} ${task.type || ''}`))
+    .sort((a, b) => parseHuiceTime(b.createdAt) - parseHuiceTime(a.createdAt))[0] ?? null;
+}
+```
+
+同文件实现时间解析，下载中心缺时间或时间格式无效的记录必须被排除：
+
+```js
+export function parseHuiceTime(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const text = String(value || '').trim();
+  if (!text) return Number.NEGATIVE_INFINITY;
+  const iso = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text)
+    ? `${text.replace(' ', 'T')}+08:00`
+    : text;
+  const timestamp = Date.parse(iso);
+  return Number.isFinite(timestamp) ? timestamp : Number.NEGATIVE_INFINITY;
+}
+```
+
+若返回 `null`，继续轮询直到超时并把该日期写入失败日期文件；禁止退回“第一条下载按钮”。下载后除日期外，还要验证工作簿表头同时包含“店铺名称”和“销售收入/一、销售收入”，否则删除本次临时文件并判定失败，不能入库。
+
+商品导出器 `tools/huice-export-cdp.mjs` 同步修复相同问题：新增 `pickProductDownloadTask()`，按“商品排名导出/商品利润报表 + 请求时间 + 完成状态”选择任务；XLSX 内日期必须与 `targetDate` 一致后才能给记录写入该日期。禁止继续“下载第一行后直接把所有记录标成 targetDate”。
+
+在 `test/huice-export-parser.test.mjs` 增加：
+
+```js
+test('rejects a stale product export from another date', () => {
+  const result = validateProductWorkbook({
+    targetDate: '2026-07-09',
+    workbookDate: '2026-07-08',
+    headers: ['店铺名称', '链接名称', '链接ID'],
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'date_mismatch');
+});
+```
+
 - [ ] **Step 8: 解析 XLSX 并入库**
 
 使用 `openpyxl` 或现有 XLSX 读取能力把表格转成二维数组，再调用：
@@ -748,12 +1049,49 @@ function clickDialogButtonByText(dialogText, buttonText) {
 ```js
 const records = parseShopExportRows(rows, date);
 for (const record of records) {
-  const shop = upsertShop({ shopName: record.shopName });
+  const shop = upsertShop(record.shopName);
   upsertShopDailyProfit({ ...record, shopId: shop.shop_id });
 }
 ```
 
 不得把真实 XLSX fixture 提交。测试 fixture 必须脱敏、最小化。
+
+解析和入库必须同时满足：
+
+```text
+找到“店铺名称”表头
+至少解析到 1 家“拼”开头店铺
+不存在淘宝/天猫/抖音等非拼多多店铺行
+目标日期与工作簿日期一致
+SQLite 事务全部提交成功
+```
+
+任一条件失败：不归档为成功文件、不写成功快照、加入 `failedDates`。SQLite 写入使用事务，禁止逐行写到一半后留下半份数据。
+
+- [ ] **Step 8A: 让失败正确传递给定时任务**
+
+主流程结束时执行：
+
+```js
+if (failedDates.length > 0) process.exitCode = 1;
+```
+
+下载按钮未找到、XLSX 0 行、日期不符、数据库失败都必须进入 `failedDates`。商品导出器 `tools/huice-export-cdp.mjs` 同样修正：下载超时要记录失败日期，数据库失败要非零退出，禁止“打印警告后显示回采完成”。
+
+- [ ] **Step 8B: 清理 CDP timeout**
+
+所有 `cdpCall()` 在成功、协议错误和超时三个分支都清除定时器：
+
+```js
+const timer = setTimeout(onTimeout, timeoutMs);
+function finish(callback) {
+  clearTimeout(timer);
+  ws.removeEventListener('message', handler);
+  callback();
+}
+```
+
+单日实测结束后 Node 进程应立即退出，不再额外挂住 15-30 秒。
 
 - [ ] **Step 9: 单日实测**
 
@@ -820,7 +1158,41 @@ function collectMatchedHuiceProductIds(rows) {
 
 禁止从商品列表全量扫未命中商品。
 
-- [ ] **Step 2: 服务端反查候选店铺**
+- [ ] **Step 2: 写映射失败测试**
+
+在 `test/huice-server-shop-profit.test.mjs` 准备两个慧经营店铺，并断言：
+
+```js
+test('does not guess a shop from a similar PDD shop name', async () => {
+  seedHuiceShop({ shopId: 1, shopName: '拼【周贝瑞' });
+  seedHuiceShop({ shopId: 2, shopName: '拼【周贝瑞二店' });
+
+  const response = await requestJson('/shop-profit?pddShopName=周贝瑞&start=2026-07-09&end=2026-07-09');
+
+  assert.equal(response.statusCode, 400);
+  assert.equal(response.body.status, 'mall_id_required');
+});
+
+test('does not fall back to the first Huice shop when mapping is absent', async () => {
+  seedHuiceShopDailyProfit({ shopId: 1, date: '2026-07-09', netProfit: 999 });
+
+  const response = await requestJson('/shop-profit?mallId=unmapped&start=2026-07-09&end=2026-07-09');
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.body.status, 'no_mapping');
+  assert.deepEqual(response.body.days, []);
+});
+```
+
+Run:
+
+```bash
+node --test test/huice-server-shop-profit.test.mjs
+```
+
+Expected: 至少一项 FAIL，因为最新基线仍有店名模糊匹配和第一家店回退。
+
+- [ ] **Step 3: 服务端反查候选店铺**
 
 SQL 逻辑：
 
@@ -844,7 +1216,9 @@ ORDER BY matched_product_count DESC, s.shop_name ASC;
 多个候选 -> status = ambiguous，不自动写确认映射
 ```
 
-- [ ] **Step 3: 显示映射状态**
+额外规则：`productIds` 为空时直接返回 `none`，不能改用店名；候选 SQL 只使用参数占位符；自动映射必须记录实际命中的商品数。
+
+- [ ] **Step 4: 显示映射状态**
 
 店铺报表数据区域顶部加一行状态：
 
@@ -856,7 +1230,7 @@ ORDER BY matched_product_count DESC, s.shop_name ASC;
 
 不要用店名猜测自动绑定。
 
-- [ ] **Step 4: 人工确认接口**
+- [ ] **Step 5: 人工确认接口**
 
 当多个候选时，前端可以弹简单选择器；用户选定后调用：
 
@@ -872,7 +1246,27 @@ status = confirmed
 matched_product_count = 当前候选命中数
 ```
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 6: 删除全部猜测式回退并复测**
+
+在 `tools/huice-server.mjs` 删除以下行为：
+
+```text
+读取 /shop-profit 的 pddShopName 作为匹配条件
+店名清洗后 LIKE '%关键字%'
+任何店铺查询中的 LIMIT 1 猜测
+无映射时取日期范围内第一家“拼%”店铺
+```
+
+Run:
+
+```bash
+rg -n "pddShopName.*LIKE|LIKE.*keyword|日期范围|LIMIT 1" tools/huice-server.mjs
+node --test test/huice-server-shop-profit.test.mjs
+```
+
+Expected: `rg` 不再命中上述回退逻辑；测试 PASS。
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add dts/source/pdd-enhancer.js tools/huice-server.mjs scripts/huice/lib/db.mjs test/huice-server-shop-profit.test.mjs
@@ -890,6 +1284,8 @@ git commit -m "feat(report): map PDD mall to Huice shop by matched products"
 
 **Interfaces:**
 - `GET /shop-profit?mallId=123&start=2026-07-03&end=2026-07-09`
+- `pddShopName` 只允许作为映射记录的显示信息出现在 POST 请求体中，不允许作为 GET 查询或自动匹配依据。
+- `createHuiceServer({ host = '127.0.0.1', port = 0 }) -> http.Server`，供测试使用随机端口。
 
 Response:
 
@@ -906,7 +1302,7 @@ Response:
       "date": "2026-07-09",
       "salesAmount": 1000,
       "promoSpend": 100,
-      "roi": 4.2,
+      "roi": 10,
       "breakEvenRoi": 8,
       "promoFeeRatio": 0.1,
       "netProfitRate": 0.125,
@@ -919,6 +1315,23 @@ Response:
 
 - [ ] **Step 1: 写 API 测试**
 
+先把服务启动改成可测试入口，模块被测试 `import` 时不得自动监听 9911：
+
+```js
+export function createHuiceServer() {
+  return createServer(handler);
+}
+
+const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  createHuiceServer().listen(PORT, HOST, () => {
+    console.log(`慧经营数据服务: http://${HOST}:${PORT}`);
+  });
+}
+```
+
+测试设置临时 `HUICE_DB_PATH`，调用 `server.listen(0, '127.0.0.1')` 获取随机端口，并在 `after()` 中关闭服务和数据库。禁止测试连接用户正在运行的 9911 服务。
+
 测试 4 种状态：
 
 ```text
@@ -926,6 +1339,27 @@ ok: 有映射、有利润数据
 no_mapping: mallId 没有映射
 ambiguous: 候选不唯一
 no_data: 有映射但日期无数据
+```
+
+再加一个来源优先级测试：慧经营日报 `promo_spend=80`、拼多多参考表 `promo_spend=100` 时，接口必须返回慧经营的 `80`：
+
+```js
+test('returns Huice promotion cost instead of PDD reference cost', async () => {
+  seedConfirmedMapping({ mallId: '123', huiceShopId: 1 });
+  seedHuiceShopDailyProfit({
+    shopId: 1,
+    date: '2026-07-09',
+    salesAmount: 1000,
+    promoSpend: 80,
+    netProfit: 125,
+  });
+  seedPddPromoReference({ mallId: '123', date: '2026-07-09', promoSpend: 100 });
+
+  const response = await requestJson('/shop-profit?mallId=123&start=2026-07-09&end=2026-07-09');
+  assert.equal(response.body.days[0].promoSpend, 80);
+  assert.equal(response.body.days[0].promoFeeRatio, 0.08);
+  assert.equal(response.body.days[0].roi, 12.5);
+});
 ```
 
 - [ ] **Step 2: 实现日期范围补空行**
@@ -942,11 +1376,26 @@ function fillDateRange({ start, end, rowsByDate }) {
 }
 ```
 
+`eachDate` 必须按自然日推进，避免夏令时或本地时区造成漏日：
+
+```js
+function* eachDate(start, end) {
+  const cursor = new Date(`${start}T00:00:00Z`);
+  const last = new Date(`${end}T00:00:00Z`);
+  while (cursor <= last) {
+    yield cursor.toISOString().slice(0, 10);
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+}
+```
+
 这样前端可以保持昨天/近 7 日/近 1 月的日期行完整。
 
 - [ ] **Step 3: 合并推广数据**
 
-本地服务直接返回慧经营店铺导出中的真实推广费、真实净利、净利率、费比和 ROI。前端不再默认从拼多多推广页补主数据；拼多多推广页只作为人工核对或用户另行确认后的缺字段补充来源。
+本地服务直接返回慧经营店铺导出中的真实推广费、真实净利、净利率、费比和 ROI。前端不再默认从拼多多推广页补主数据；拼多多推广页只保存在独立参考表中。
+
+本任务内不得实现“慧经营缺字段时自动拿拼多多数据补齐”。慧经营字段缺失就返回 `null`，前端显示 `--`。以后若用户确认需要补充，必须新增带来源标记的独立设计和审核任务。
 
 服务端返回字段：
 
@@ -969,7 +1418,61 @@ roi             <- 慧经营“ROI/投入产出比”，缺失时用 salesAmount
 breakEvenRoi    <- 1 / netProfitRate
 ```
 
-- [ ] **Step 4: 提交**
+- [ ] **Step 4: 收紧本地 HTTP 服务安全边界**
+
+允许来源固定为：
+
+```js
+const ALLOWED_ORIGINS = new Set([
+  'https://mms.pinduoduo.com',
+  'https://yingxiao.pinduoduo.com',
+]);
+if (process.env.DTS_EXTENSION_ID) {
+  ALLOWED_ORIGINS.add(`chrome-extension://${process.env.DTS_EXTENSION_ID}`);
+}
+```
+
+规则：
+
+```text
+没有 Origin 的本机 CLI/curl 请求允许
+Origin 在白名单内允许，并原样返回 Access-Control-Allow-Origin
+其他 Origin 返回 403，绝不返回经营数据
+Access-Control-Allow-Methods 必须是 GET, POST, OPTIONS
+响应增加 Vary: Origin
+POST 请求体上限 64 KiB
+日期必须是 YYYY-MM-DD、start <= end、最多 366 天
+/health 不返回数据库绝对路径
+```
+
+在 `test/huice-server-shop-profit.test.mjs` 增加：
+
+```js
+test('rejects an unrelated website origin', async () => {
+  const response = await requestJson('/huice?start=2026-07-09&end=2026-07-09', {
+    headers: { Origin: 'https://evil.example' },
+  });
+  assert.equal(response.statusCode, 403);
+});
+
+test('allows JSON POST preflight from Pinduoduo', async () => {
+  const response = await requestOptions('/shop-mapping/candidates', {
+    Origin: 'https://mms.pinduoduo.com',
+    'Access-Control-Request-Method': 'POST',
+    'Access-Control-Request-Headers': 'content-type',
+  });
+  assert.equal(response.statusCode, 204);
+  assert.match(response.headers['access-control-allow-methods'], /POST/);
+});
+
+test('rejects an excessive date range', async () => {
+  const response = await requestJson('/shop-profit?mallId=123&start=2020-01-01&end=2026-07-09');
+  assert.equal(response.statusCode, 400);
+  assert.equal(response.body.status, 'invalid_date_range');
+});
+```
+
+- [ ] **Step 5: 提交**
 
 ```bash
 git add tools/huice-server.mjs scripts/huice/lib/shop-profit.mjs test/huice-server-shop-profit.test.mjs
@@ -1010,7 +1513,35 @@ function readStoreReportDateRange(context) {
 调用本地服务：
 
 ```js
-const response = await fetch(`http://127.0.0.1:9911/shop-profit?mallId=${encodeURIComponent(mallId)}&start=${start}&end=${end}`);
+async function fetchShopProfitRange({ mallId, start, end }) {
+  if (!mallId) return { status: 'mall_id_required', days: [] };
+  const query = new URLSearchParams({ mallId: String(mallId), start, end });
+  const response = await fetch(`http://127.0.0.1:9911/shop-profit?${query}`);
+  if (!response.ok) throw new Error(`shop-profit HTTP ${response.status}`);
+  return response.json();
+}
+```
+
+禁止保留旧签名 `fetchShopProfitRange(start, end, pddShopName)`。`mallId` 从当前拼多多登录店铺的稳定页面数据读取；拿不到时显示“无法识别当前店铺”，不能退回店名匹配。
+
+若首次返回 `no_mapping`：
+
+```js
+const productIds = collectMatchedHuiceProductIds(currentProductRows);
+const mappingResponse = await fetch('http://127.0.0.1:9911/shop-mapping/candidates', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ mallId, pddShopName, productIds }),
+}).then((res) => res.json());
+```
+
+处理规则：
+
+```text
+unique    -> 服务端自动保存映射，再请求一次 /shop-profit
+ambiguous -> 展示候选供人工确认，不展示任何一家利润
+none      -> 展示“未匹配到慧经营店铺”
+productIds 为空 -> 展示“暂无已匹配商品，无法识别店铺”
 ```
 
 失败时展示：
@@ -1086,13 +1617,79 @@ dts-store-profit-loss
 
 - [ ] **Step 6: 保持幂等**
 
-每次渲染前只删除自己创建的节点：
+面板幂等 key 必须包含店铺和日期：
 
 ```js
-context.root.querySelectorAll('.dts-store-profit-panel').forEach((node) => node.remove());
+const requestKey = `${mallId}:${start}:${end}`;
+const previous = context.root.querySelector('.dts-store-profit-panel');
+if (previous?.dataset.requestKey === requestKey && previous.dataset.state === 'ready') return;
+previous?.remove();
+
+const controller = new AbortController();
+activeStoreProfitRequest?.abort();
+activeStoreProfitRequest = controller;
+panel.dataset.requestKey = requestKey;
+panel.dataset.state = 'loading';
 ```
 
-不能清空整个表格、不能删除已有绿色/紫色列、不能动其他页签 DOM。
+响应回来后再次检查：
+
+```js
+if (controller.signal.aborted) return;
+if (!panel.isConnected || panel.dataset.requestKey !== requestKey) return;
+if (getCurrentMallId() !== String(mallId)) return;
+```
+
+失败面板不能永久命中幂等判断，用户重开或点击重试时必须重新请求。不能清空整个表格、不能删除已有绿色/紫色列、不能动其他页签 DOM。
+
+- [ ] **Step 6A: 禁止动态数据直接进入 innerHTML**
+
+店铺名、日期、接口错误和所有金额都使用 `textContent` 创建单元格：
+
+```js
+function appendCell(row, text, className = '') {
+  const cell = document.createElement('td');
+  cell.className = className;
+  cell.textContent = text == null ? '--' : String(text);
+  row.appendChild(cell);
+  return cell;
+}
+```
+
+允许使用固定模板创建静态表头，但禁止以下形式：
+
+```js
+panel.innerHTML = '...' + data.mapping.huiceShopName + '...';
+panel.innerHTML = '加载失败: ' + error.message;
+```
+
+- [ ] **Step 6B: 修复只有一页时汇总失败**
+
+修改现有 `collectMatchedReportRecords()`：
+
+```js
+const initial = getDialogPageData(dialog, huiceMap);
+if (!initial) return { ok: false, reason: 'renderData unavailable' };
+
+const pager = dialog.querySelector('.el-pagination');
+const pageNumbers = pager
+  ? [...pager.querySelectorAll('.el-pager .number')]
+      .map((node) => Number(node.textContent))
+      .filter(Number.isFinite)
+  : [];
+const hasMultiplePages = pageNumbers.some((number) => number > 1);
+
+if (!pager || !hasMultiplePages) {
+  return {
+    ok: true,
+    scannedProductIds: new Set(initial.scannedProductIds),
+    matchedRecords: new Map(initial.matchedRecords),
+    pageCount: 1,
+  };
+}
+```
+
+只有确认存在多页时才强制要求上一页/下一页按钮。新增手工验收：一家只有 1 页的店铺能正常汇总；一家超过 1 页的店铺逐页收集后能恢复原页。
 
 - [ ] **Step 7: 手工验收**
 
@@ -1107,6 +1704,10 @@ context.root.querySelectorAll('.dts-store-profit-panel').forEach((node) => node.
 商品列表 -> 无新增店铺日报面板
 商品列表 -> 原有商品级利润、原始净利/调整净利逻辑不变
 另外 3 个页签 -> 无新增店铺日报面板
+相同日期从店铺 A 切换到店铺 B -> 不显示 A 的店铺名或数据
+店铺 A 慢请求返回时当前已在店铺 B -> A 的响应被丢弃
+只有 1 页商品 -> 店铺汇总正常显示
+接口失败后点击重试 -> 可以重新请求
 ```
 
 - [ ] **Step 8: 提交**
@@ -1123,6 +1724,17 @@ git commit -m "feat(report): render daily shop profit in store report"
 **Files:**
 - Modify: `scripts/huice-daily.sh`
 - Modify: `scripts/huice-daily.ps1`
+- Modify: `install.sh`
+- Modify: `install.ps1`
+- Modify: `scripts/start-cdp-chrome.ps1`
+- Create: `scripts/start-huice-server.ps1`
+- Create: `scripts/huice/lib/date.mjs`
+- Create: `test/date-utils.test.mjs`
+- Modify: `tools/huice-export-cdp.mjs`
+- Modify: `tools/pdd-promo-cdp.mjs`
+- Modify: `tools/write-storage.mjs`
+- Modify: `dts/source/pdd-enhancer.js`
+- Modify: `README.md`
 - Modify: `docs/OPERATIONS.md`
 
 **Interfaces:**
@@ -1173,12 +1785,91 @@ node "$PROJECT_DIR/tools/huice-shop-export-cdp.mjs" --dates "$YESTERDAY"
 
 如果店铺同步失败，记录日志和失败日期，但不要影响已有商品同步数据。
 
+具体做法：先完成商品同步，再记录 `SHOP_SYNC_FAILED=1`；脚本末尾返回非零退出码，让 launchd/监控知道当天店铺数据失败。不能因为店铺失败删除或回滚已经成功的商品数据，也不能静默返回成功。
+
 - [ ] **Step 4: 接入 Windows 每日同步**
 
 在 `scripts/huice-daily.ps1` 商品同步完成后追加等价命令：
 
 ```powershell
 node "$ProjectDir/tools/huice-shop-export-cdp.mjs" --dates $Yesterday
+```
+
+检查 `$LASTEXITCODE`，规则与 macOS 一致：保留已成功商品数据，但整个任务最终返回失败并在日志写明失败日期。
+
+- [ ] **Step 4A: 修复 Windows 开机任务**
+
+新增 `scripts/start-huice-server.ps1`：
+
+```powershell
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ProjectDir = Split-Path -Parent $ScriptDir
+$Server = Join-Path $ProjectDir "tools\huice-server.mjs"
+Start-Process -FilePath "node" -ArgumentList @($Server) -WindowStyle Hidden
+```
+
+`install.ps1` 的计划任务改为调用这个确定路径的脚本，禁止把字面量 `$SCRIPT_DIR` 写入新 PowerShell 进程：
+
+```powershell
+$serverScript = Join-Path $SCRIPT_DIR "scripts\start-huice-server.ps1"
+schtasks /Create /TN "Daima_Huice_Server" /TR "powershell -ExecutionPolicy Bypass -File `"$serverScript`"" /SC ONLOGON /F
+```
+
+`scripts/start-cdp-chrome.ps1` 的标准输出和错误输出使用两个不同文件：
+
+```powershell
+-RedirectStandardOutput (Join-Path $env:TEMP "chrome-cdp.out.log") `
+-RedirectStandardError  (Join-Path $env:TEMP "chrome-cdp.err.log")
+```
+
+- [ ] **Step 4B: 为两个平台安装并验证 openpyxl**
+
+不得要求 sudo 或写系统 Python。在 `private/pyenv` 创建项目私有虚拟环境：
+
+```bash
+python3 -m venv private/pyenv
+private/pyenv/bin/python -m pip install --upgrade pip openpyxl
+private/pyenv/bin/python -c "import openpyxl; print(openpyxl.__version__)"
+```
+
+Windows 等价命令：
+
+```powershell
+python -m venv private\pyenv
+private\pyenv\Scripts\python.exe -m pip install --upgrade pip openpyxl
+private\pyenv\Scripts\python.exe -c "import openpyxl; print(openpyxl.__version__)"
+```
+
+两个导出器统一优先读取：
+
+```text
+HUICE_PYTHON 环境变量
+macOS: private/pyenv/bin/python
+Windows: private/pyenv/Scripts/python.exe
+最后才尝试系统 python3/python
+```
+
+找不到解释器或 `import openpyxl` 失败时，安装和采集都必须明确失败，不能只显示“部分功能可能受限”。
+
+- [ ] **Step 4C: 统一中国本地业务日期**
+
+在 `tools/huice-export-cdp.mjs`、`tools/pdd-promo-cdp.mjs`、`tools/write-storage.mjs` 和 `dts/source/pdd-enhancer.js` 中，把业务日期的 `toISOString().slice(0, 10)` 改成本地年月日格式：
+
+```js
+function formatLocalDate(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+```
+
+增加测试固定在中国时间 `2026-07-10 00:30`，昨天必须是 `2026-07-09`，不能变成 `2026-07-08`。
+
+Node 工具共用 `scripts/huice/lib/date.mjs`；浏览器内容脚本保留等价的小函数。运行测试：
+
+```bash
+TZ=Asia/Shanghai node --test test/date-utils.test.mjs
 ```
 
 - [ ] **Step 5: 文档补命令**
@@ -1191,12 +1882,17 @@ node "$ProjectDir/tools/huice-shop-export-cdp.mjs" --dates $Yesterday
 失败日期重试
 确认 private/output 不入 Git
 本地服务启动后如何刷新扩展
+Windows 开机服务和每日任务验证
+openpyxl 私有环境检查
+凌晨业务日期验证
 ```
+
+同时修正 `README.md`：新增整店铺日报使用慧经营真实推广费；拼多多推广采集只作为独立参考，不再宣称每天默认覆盖店铺日报。
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add scripts/huice-daily.sh scripts/huice-daily.ps1 docs/OPERATIONS.md
+git add scripts/huice-daily.sh scripts/huice-daily.ps1 scripts/start-cdp-chrome.ps1 scripts/start-huice-server.ps1 scripts/huice/lib/date.mjs tools/huice-export-cdp.mjs tools/pdd-promo-cdp.mjs tools/write-storage.mjs dts/source/pdd-enhancer.js test/date-utils.test.mjs install.sh install.ps1 README.md docs/OPERATIONS.md
 git commit -m "chore(sync): add shop profit daily export"
 ```
 
@@ -1220,6 +1916,30 @@ npm run check:js
 ```
 
 Expected: all pass.
+
+其中测试套件必须至少覆盖以下回归用例，不能只看总数通过：
+
+```text
+慧经营 promo_spend=80、拼多多参考=100 -> 接口和 UI 使用 80
+没有 mallId -> mall_id_required
+有 mallId 但无确认映射 -> no_mapping，不返回任何店铺利润
+两个相似店名 -> 不使用 LIKE/LIMIT 1 猜测
+商品 ID 唯一候选 -> 自动映射
+商品 ID 多候选 -> ambiguous，不自动选择
+下载中心同时有商品报表、旧店铺报表和生成中任务 -> 只选本次已完成店铺报表
+下载工作簿缺“店铺名称”或“销售收入” -> 拒绝入库
+Excel 数值 0.125 和字符串 12.5% -> 都解析为 0.125，保本 ROI 为 8
+商品下载文件日期与目标日期不同 -> 拒绝入库，不允许强制改日期
+店铺筛选不是全部“拼”开头 -> 当天失败，不下载
+XLSX 0 行或 SQLite 事务失败 -> 写失败日期并返回非零退出码
+慧经营净利润小于 0 -> 整个店铺日报行标红
+商品列表和另外 3 个页签 -> 不出现店铺日报 DOM
+恶意网页 Origin -> 本地服务返回 403
+拼多多 Origin 的 POST 预检 -> 允许 POST
+相同日期切换店铺 -> 不残留上一家数据
+单页商品报表 -> 店铺汇总正常
+中国时间凌晨 00:30 计算昨天 -> 日期正确
+```
 
 - [ ] **Step 2: 数据安全检查**
 
@@ -1253,6 +1973,12 @@ private/output 真实数据必须是 !! ignored。
 本地服务关闭 / 店铺报表 / 显示服务未启动，不影响弹窗
 映射无候选 / 店铺报表 / 显示未匹配
 映射多候选 / 店铺报表 / 显示请确认映射
+两个名称相近店铺 / 店铺报表 / 不串店
+慧经营推广费与拼多多参考费不同 / 店铺报表 / 展示慧经营值
+相同日期切换两家店 / 店铺报表 / 请求 key 随 mallId 改变
+单页店铺 / 商品报表汇总 / 无分页器也能汇总
+断开 SQLite 写权限 / 采集脚本 / 非零退出且失败日期可补采
+Windows 重启后 / 计划任务 / 9911 服务与店铺日报任务均启动
 ```
 
 - [ ] **Step 4: 提交最后修复**
@@ -1305,6 +2031,17 @@ PR 描述必须包含：
 - [ ] 计划明确亏损整行标红。
 - [ ] 计划先跑单日，再跑 30 天回采。
 - [ ] 计划写明了慧经营选择、下载、弹窗和下载中心踩坑。
+- [ ] `/shop-profit` 只按 `mallId` 的确认映射查询，没有店名 `LIKE`、关键字截取或第一家店回退。
+- [ ] `tools/pdd-promo-cdp.mjs` 不再更新 `shop_daily_profit`，拼多多数据只进独立参考表。
+- [ ] 下载中心同时按任务类型、请求时间、完成状态和工作簿表头校验，没有“第一条下载”回退。
+- [ ] 慧经营字段缺失时显示 `--`，不会静默混入拼多多参考值。
+- [ ] 百分比数值和百分号字符串都不会重复除以 100。
+- [ ] 商品与店铺下载都校验任务类型、请求时间、状态、表头和日期。
+- [ ] 店铺面板以 `mallId + 日期范围` 为 key，并丢弃过期响应。
+- [ ] 单页商品报表不依赖分页器。
+- [ ] 本地服务拒绝非白名单网页 Origin，POST 预检可用，请求体和日期范围有限制。
+- [ ] macOS/Windows 都验证私有 `openpyxl` 环境并执行店铺日报同步。
+- [ ] 任何采集或入库失败都会产生失败记录和非零退出码。
 
 ## Execution Handoff
 
