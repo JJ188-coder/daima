@@ -23,11 +23,9 @@ import { fileURLToPath } from 'node:url';
 import {
   getProductProfitByDate,
   getDbPath,
-  getShopDailyProfitRangeByMallId,
   getPddShopMapping,
   upsertPddShopMapping,
   findShopCandidatesByProductIds,
-  getPddPromoDailyRange,
 } from '../scripts/huice/lib/db.mjs';
 import { aggregateProfitRecords } from '../scripts/huice/lib/profit.mjs';
 import { buildStoreReportDay, fillDateRange } from '../scripts/huice/lib/shop-profit.mjs';

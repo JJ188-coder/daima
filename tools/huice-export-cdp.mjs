@@ -219,8 +219,15 @@ for row in rows[11:]:
         try: return float(s)
         except: return None
     def pp(v):
+        # 百分比转小数: "12.50%"->0.125, 12.5->0.125, 0.125->0.125
+        if v is None: return None
+        s = str(v)
+        has_percent = '%' in s
         n = pn(v)
-        return n/100 if n is not None else None
+        if n is None: return None
+        if has_percent: return n / 100
+        if n > 1 or n < -1: return n / 100
+        return n
     # 慧经营原始净利额
     raw_net_profit = pn(row[15])
     raw_net_profit_rate = pp(row[16])

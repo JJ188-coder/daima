@@ -24,12 +24,22 @@ export function toNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-/** 百分比字符串转小数 ("12.50%" -> 0.125) */
+/** 百分比转小数
+ * 输入可能是: "12.50%"(字符串), 12.5(显示值), 0.125(Excel数值格式)
+ * 输出统一为小数: 0.125
+ */
 export function toPercent(value) {
   if (value == null || value === '' || value === '--') return null;
   const s = String(value).replace(/%/g, '').trim();
   const n = Number(s.replace(/,/g, ''));
-  return Number.isFinite(n) ? n / 100 : null;
+  if (!Number.isFinite(n)) return null;
+  // 如果值带 % 符号,说明是显示值,除以 100
+  if (String(value).includes('%')) return n / 100;
+  // 如果不带 %,判断范围:
+  // > 1 或 < -1: 显示值(如 12.5),除以 100
+  // <= 1 且 >= -1: 底层值(如 0.125),不除以 100
+  if (n > 1 || n < -1) return n / 100;
+  return n;
 }
 
 export function buildStoreReportDay({ date, shop }) {
