@@ -289,8 +289,8 @@ async function main() {
     })()`);
     await sleep(500);
 
-    // 3. 等数据加载
-    await sleep(3000);
+    // 3. 等数据加载(拼多多推广平台切换日期后需要等数据刷新)
+    await sleep(5000);
 
     // 4. 读推广费
     const promo = await readPromoData(ws);
