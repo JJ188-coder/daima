@@ -17,6 +17,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import Database from 'better-sqlite3';
+import { upsertPddPromoDaily } from '../scripts/huice/lib/db.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -159,7 +160,7 @@ async function readPromoData(ws) {
   return result ? JSON.parse(result) : null;
 }
 
-/** 更新 shop_daily_profit 的推广费字段 */
+/** 写入 pdd_promo_daily 独立表(不覆盖 shop_daily_profit) */
 function updatePromoSpend(date, promoData) {
   if (!existsSync(DB_PATH)) return false;
   const db = new Database(DB_PATH);
@@ -176,12 +177,17 @@ function updatePromoSpend(date, promoData) {
 
   if (!shopRow) { db.close(); return false; }
 
-  const result = db.prepare(`
-    UPDATE shop_daily_profit SET promo_spend = ?, roi = ? WHERE shop_id = ? AND date = ?
-  `).run(promoData.promoSpend ?? null, promoData.roi ?? null, shopRow.shop_id, date);
+  // 写入独立的 pdd_promo_daily 表,不碰 shop_daily_profit
+  upsertPddPromoDaily({
+    shopId: shopRow.shop_id,
+    date: date,
+    promoSpend: promoData.promoSpend,
+    roi: promoData.roi,
+    gmv: promoData.gmv,
+  });
 
   db.close();
-  return result.changes > 0;
+  return true;
 }
 
 async function main() {

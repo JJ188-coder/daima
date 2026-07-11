@@ -140,6 +140,21 @@ function initSchema(db) {
       FOREIGN KEY (huice_shop_id) REFERENCES shops(shop_id)
     );
   `);
+
+  // 拼多多推广日报表(独立于 shop_daily_profit,避免推广数据覆盖慧经营原始数据)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pdd_promo_daily (
+      shop_id       INTEGER NOT NULL,
+      date          TEXT NOT NULL,
+      promo_spend   REAL,
+      roi           REAL,
+      gmv           REAL,
+      captured_at   TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (shop_id, date),
+      FOREIGN KEY (shop_id) REFERENCES shops(shop_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_pdd_promo_daily_date ON pdd_promo_daily(date);
+  `);
 }
 
 function productProfitTableSql(tableName) {
@@ -507,4 +522,35 @@ export function findShopCandidatesByProductIds(productIds) {
     GROUP BY s.shop_id, s.huice_name
     ORDER BY matched_product_count DESC, s.huice_name ASC
   `).all(...productIds);
+}
+
+// ============ 拼多多推广日报(独立表,不覆盖慧经营数据) ============
+
+export function upsertPddPromoDaily(record) {
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO pdd_promo_daily (shop_id, date, promo_spend, roi, gmv)
+    VALUES (@shopId, @date, @promoSpend, @roi, @gmv)
+    ON CONFLICT(shop_id, date) DO UPDATE SET
+      promo_spend = excluded.promo_spend,
+      roi = excluded.roi,
+      gmv = excluded.gmv,
+      captured_at = datetime('now')
+  `).run({
+    shopId: record.shopId,
+    date: record.date,
+    promoSpend: record.promoSpend ?? null,
+    roi: record.roi ?? null,
+    gmv: record.gmv ?? null,
+  });
+}
+
+export function getPddPromoDaily(shopId, date) {
+  const db = getDb();
+  return db.prepare('SELECT * FROM pdd_promo_daily WHERE shop_id = ? AND date = ?').get(shopId, date);
+}
+
+export function getPddPromoDailyRange(shopId, startDate, endDate) {
+  const db = getDb();
+  return db.prepare('SELECT * FROM pdd_promo_daily WHERE shop_id = ? AND date BETWEEN ? AND ? ORDER BY date').all(shopId, startDate, endDate);
 }
