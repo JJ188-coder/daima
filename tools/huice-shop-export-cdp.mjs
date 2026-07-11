@@ -88,25 +88,12 @@ async function cdpEval(ws, expression) {
   return res.result?.result?.value;
 }
 
-/** 关闭弹窗（"我知道了" + 所有遮挡弹窗 + 遮罩层） */
+/** 关闭弹窗（"我知道了"等通知按钮,不点遮罩层避免触发页面跳转） */
 async function closePopups(ws) {
   await cdpEval(ws, `(() => {
-    // 1. 关闭所有通知按钮
     document.querySelectorAll('button, .el-button').forEach(el => {
       const t = (el.innerText || '').trim().replace(/\\s/g, '');
       if (['我知道了', '300S后关闭', '确定', '关闭', '取消'].includes(t) && el.offsetParent !== null) el.click();
-    });
-    // 2. 点击遮罩层关闭弹窗(v-modal / el-overlay)
-    document.querySelectorAll('.v-modal, .el-overlay, .el-dialog__wrapper').forEach(el => {
-      if (el.offsetParent !== null) el.click();
-    });
-    // 3. 关闭通知容器(直接移除 DOM)
-    document.querySelectorAll('.el-notification, .el-message-box, .el-dialog__wrapper').forEach(el => {
-      if (el.offsetParent !== null) {
-        // 先尝试点关闭按钮
-        const closeBtn = el.querySelector('.el-icon-close, .el-dialog__close, [aria-label="Close"]');
-        if (closeBtn) closeBtn.click();
-      }
     });
     return 'ok';
   })()`);
@@ -418,13 +405,12 @@ async function downloadFromCenter(ws, targetDate, exportRequestedAt) {
   // 轮询等 AG-Grid 行加载 + 找下载按钮
   let result = null;
   for (let attempt = 0; attempt < 20; attempt++) {
-    // 每轮先关所有弹窗+通知+遮罩
+    // 每轮先关通知按钮(不点遮罩层,避免页面跳转)
     await cdpEval(ws, `(() => {
       document.querySelectorAll('button, .el-button').forEach(b => {
         const t = (b.innerText || '').trim().replace(/\\s/g, '');
         if (['我知道了', '300S后关闭', '确定', '关闭', '取消'].includes(t) && b.offsetParent !== null) b.click();
       });
-      document.querySelectorAll('.v-modal, .el-overlay').forEach(el => { if (el.offsetParent !== null) el.click(); });
       return 'ok';
     })()`);
 
