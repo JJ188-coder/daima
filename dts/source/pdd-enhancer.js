@@ -936,6 +936,45 @@ async function getPromoDataByWindow(window) {
     const fmtRatio = v => v == null ? '--' : Number(v).toFixed(2);
 
     let html = '<div style="color:#722ed1;font-weight:600;margin-bottom:4px;">🏪 店铺逐日利润 (' + escapeHtml(data.mapping?.huiceShopName || '') + ')</div>';
+
+    // === 汇总行 ===
+    const validDays = data.days.filter(d => !d.missing);
+    if (validDays.length > 0) {
+      const sumSales = validDays.reduce((s, d) => s + (Number(d.salesAmount) || 0), 0);
+      const sumNetProfit = validDays.reduce((s, d) => s + (Number(d.netProfit) || 0), 0);
+      const sumPromoSpend = validDays.reduce((s, d) => s + (Number(d.promoSpend) || 0), 0);
+      const summaryNetProfitRate = sumSales > 0 ? sumNetProfit / sumSales : null;
+      const summaryPromoFeeRatio = sumSales > 0 && sumPromoSpend > 0 ? sumPromoSpend / sumSales : null;
+      const summaryRoi = sumPromoSpend > 0 ? sumSales / sumPromoSpend : null;
+      const summaryBreakEvenRoi = summaryNetProfitRate > 0 ? 1 / summaryNetProfitRate : null;
+      const summaryIsLoss = sumNetProfit < 0;
+
+      html += '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:6px;">';
+      html += '<thead><tr style="background:#722ed1;color:#fff;">';
+      html += '<th style="padding:4px 8px;border:1px solid #722ed1;text-align:left;">汇总(' + validDays.length + '天)</th>';
+      html += '<th style="padding:4px 8px;border:1px solid #722ed1;text-align:right;">销售额</th>';
+      html += '<th style="padding:4px 8px;border:1px solid #722ed1;text-align:right;">推广费用</th>';
+      html += '<th style="padding:4px 8px;border:1px solid #722ed1;text-align:right;">ROI</th>';
+      html += '<th style="padding:4px 8px;border:1px solid #722ed1;text-align:right;">保本ROI</th>';
+      html += '<th style="padding:4px 8px;border:1px solid #722ed1;text-align:right;">费比</th>';
+      html += '<th style="padding:4px 8px;border:1px solid #722ed1;text-align:right;">净利率</th>';
+      html += '<th style="padding:4px 8px;border:1px solid #722ed1;text-align:right;">净利润额</th>';
+      html += '</tr></thead><tbody>';
+      const summaryStyle = summaryIsLoss ? 'color:#f5222d;font-weight:700;' : 'color:#722ed1;font-weight:700;';
+      html += '<tr style="' + summaryStyle + ';">';
+      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;">合计</td>';
+      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtMoney(sumSales) + '</td>';
+      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtMoney(sumPromoSpend) + '</td>';
+      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtRatio(summaryRoi) + '</td>';
+      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtRatio(summaryBreakEvenRoi) + '</td>';
+      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtPct(summaryPromoFeeRatio) + '</td>';
+      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtPct(summaryNetProfitRate) + '</td>';
+      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtMoney(sumNetProfit) + '</td>';
+      html += '</tr>';
+      html += '</tbody></table>';
+    }
+
+    // === 逐日明细表 ===
     html += '<table style="width:100%;border-collapse:collapse;font-size:12px;">';
     html += '<thead><tr style="background:#f9f0ff;">';
     html += '<th style="padding:4px 8px;border:1px solid #e8e8e8;text-align:left;">日期</th>';
