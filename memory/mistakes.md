@@ -516,3 +516,38 @@ left.querySelector('.el-icon-arrow-left:not(.el-icon-d-arrow-left)')
   - **修复**: 切日期后先点掉 `.anq-checkbox-wrapper.anq-checkbox-wrapper-checked` 取消对比
   - **教训**: **读数据前先关掉页面上所有可能干扰数据的选项(对比/筛选/过滤)!**
   - **影响文件**: `tools/pdd-promo-cdp.mjs` 主循环
+
+- [2026-07-11] isExpectedExportTask 校验任务文本里的目标日期导致匹配失败 -> 根因:下载中心任务名用时间戳不含日期 -> 修复:去掉日期校验
+  - **现象**: 下载中心有"待下载"任务和"下载"按钮,但脚本说"未找到下载按钮"
+  - **根因**: isExpectedExportTask 要求 text.includes(targetDate),但下载中心任务名是"店铺多维度分析20260711195924"(文件名+时间戳),不含"2026-07-01"
+  - **修复**: 只校验任务类型(含"店铺多维度")+创建时间(>=请求时间)+状态(含"待下载"),不校验目标日期
+  - **教训**: **下载中心任务名格式跟预期不同! 不能假设任务文本里包含目标日期!**
+  - **影响文件**: `scripts/huice/lib/export-validation.mjs` `isExpectedExportTask()`
+
+- [2026-07-11] closePopups 点遮罩层触发页面跳转 -> 根因:SPA 路由捕获遮罩层 click -> 修复:不点遮罩层只关按钮
+  - **现象**: 去下载中心后关弹窗,页面从下载中心跳回了 trendNew
+  - **根因**: closePopups 点 .v-modal/.el-overlay 遮罩层关闭弹窗,但遮罩层的 click 事件被慧经营 SPA 路由捕获,触发了页面跳转
+  - **修复**: closePopups 只关通知按钮(我知道了/确定/关闭/取消),不点遮罩层;残留通知等3秒自动消失
+  - **教训**: **SPA 页面不能随便点遮罩层! 遮罩层 click 可能被路由捕获导致页面跳转!**
+  - **影响文件**: `tools/huice-shop-export-cdp.mjs` `closePopups()` + `downloadFromCenter()`
+
+- [2026-07-11] mallId 路径在 __NEXT_DATA__ 里不对 -> 根因:拼多多页面结构变了 -> 修复:多路径 fallback
+  - **现象**: __NEXT_DATA__.props.__ANQ_MODELS_INIT_STATE__.CommonGlobalConfig.mallId 返回 undefined
+  - **根因**: 拼多多页面结构变化,mallId 实际在 __NEXT_DATA__.props.pageProps.coreData.extra.mallId
+  - **修复**: 尝试 3 个路径: __ANQ_MODELS_INIT_STATE__.CommonGlobalConfig.mallId / pageProps.coreData.extra.mallId / pageProps.mallId
+  - **教训**: **__NEXT_DATA__ 的结构不稳定! 要用多路径 fallback!**
+  - **影响文件**: `dts/source/pdd-enhancer.js` `tryRenderShopProfitPanel()` + `tools/pdd-promo-cdp.mjs` `readMallId()`
+
+- [2026-07-11] mallId 类型不匹配(Number vs String) -> 根因:SQLite TEXT 字段用数字查不匹配 -> 修复:统一用 String()
+  - **现象**: pdd-promo-cdp.mjs 拿到 mallId=338884784(数字),但 pdd_shop_mapping.pdd_mall_id 是 TEXT 类型"338884784"(字符串),查不到映射
+  - **根因**: readMallId 返回 Number(),但 HTTP 接口建映射时传的是字符串
+  - **修复**: mallId 统一用 String()
+  - **教训**: **SQLite TEXT 字段必须用字符串查! Number 和 String 不匹配!**
+  - **影响文件**: `tools/pdd-promo-cdp.mjs` `readMallId()`
+
+- [2026-07-11] 推广费采集等待时间不够导致读到旧数据 -> 根因:拼多多推广平台切日期后数据刷新慢 -> 修复:等3秒改5秒
+  - **现象**: 7/8 和 7/9 的推广费都是 116.29(相同)
+  - **根因**: 拼多多推广平台切日期后数据刷新需要 >3s,等 3s 读到的是上一天的数据
+  - **修复**: 等待时间从 3s 改为 5s
+  - **教训**: **页面切日期后数据刷新有延迟! 等不够会读到旧数据!**
+  - **影响文件**: `tools/pdd-promo-cdp.mjs` 主循环
