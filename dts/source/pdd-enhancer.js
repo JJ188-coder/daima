@@ -824,9 +824,10 @@ async function getPromoDataByWindow(window) {
     let mallId = '';
     try {
       const nd = window.__NEXT_DATA__;
-      if (nd?.props?.__ANQ_MODELS_INIT_STATE__?.CommonGlobalConfig?.mallId) {
-        mallId = String(nd.props.__ANQ_MODELS_INIT_STATE__.CommonGlobalConfig.mallId);
-      }
+      const m = nd?.props?.__ANQ_MODELS_INIT_STATE__?.CommonGlobalConfig?.mallId
+             || nd?.props?.pageProps?.coreData?.extra?.mallId
+             || nd?.props?.pageProps?.mallId;
+      if (m) mallId = String(m);
     } catch(e) {}
 
     // 幂等: 面板已存在且日期范围+mallId没变就不重建

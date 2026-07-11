@@ -164,8 +164,11 @@ async function readPromoData(ws) {
 async function readMallId(ws) {
   const mallId = await cdpEval(ws, `(() => {
     try {
-      const mallId = window.__NEXT_DATA__?.props?.__ANQ_MODELS_INIT_STATE__?.CommonGlobalConfig?.mallId;
-      return mallId ? String(mallId) : '';
+      const nd = window.__NEXT_DATA__;
+      const m = nd?.props?.__ANQ_MODELS_INIT_STATE__?.CommonGlobalConfig?.mallId
+             || nd?.props?.pageProps?.coreData?.extra?.mallId
+             || nd?.props?.pageProps?.mallId;
+      return m ? String(m) : '';
     } catch(e) { return ''; }
   })()`);
   return mallId || '';
