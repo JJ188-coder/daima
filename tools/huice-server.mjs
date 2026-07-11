@@ -23,13 +23,14 @@ import { fileURLToPath } from 'node:url';
 import {
   getProductProfitByDate,
   getDbPath,
-  getShopDailyProfitRangeByMallId,
   getPddShopMapping,
   upsertPddShopMapping,
   findShopCandidatesByProductIds,
 } from '../scripts/huice/lib/db.mjs';
 import { aggregateProfitRecords } from '../scripts/huice/lib/profit.mjs';
 import { buildStoreReportDay, fillDateRange } from '../scripts/huice/lib/shop-profit.mjs';
+import { buildCorsHeaders } from '../scripts/huice/lib/http-security.mjs';
+import { decideShopMapping } from '../scripts/huice/lib/shop-mapping.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.HUICE_SERVER_PORT || '9911', 10);
@@ -70,13 +71,11 @@ function aggregateByProduct(records) {
 }
 
 // CORS + JSON 响应
-function sendJson(res, data, status = 200) {
+function sendJson(req, res, data, status = 200) {
   const body = JSON.stringify(data);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    ...buildCorsHeaders(req.headers.origin),
   });
   res.end(body);
 }
@@ -88,7 +87,7 @@ async function handler(req, res) {
 
   // OPTIONS 预检
   if (req.method === 'OPTIONS') {
-    sendJson(res, { ok: true });
+    sendJson(req, res, { ok: true });
     return;
   }
 
@@ -96,7 +95,7 @@ async function handler(req, res) {
     // GET /health
     if (path === '/health') {
       const dbExists = existsSync(getDbPath());
-      sendJson(res, {
+      sendJson(req, res, {
         ok: true,
         db: dbExists ? getDbPath() : 'not found',
         port: PORT,
@@ -110,13 +109,13 @@ async function handler(req, res) {
       const Database = (await import('better-sqlite3')).default;
       const dbPath = getDbPath();
       if (!existsSync(dbPath)) {
-        sendJson(res, { dates: [], error: 'database not found' });
+        sendJson(req, res, { dates: [], error: 'database not found' });
         return;
       }
       const db = new Database(dbPath, { readonly: true });
       const rows = db.prepare('SELECT DISTINCT date FROM product_profit ORDER BY date DESC').all();
       db.close();
-      sendJson(res, { dates: rows.map(r => r.date) });
+      sendJson(req, res, { dates: rows.map(r => r.date) });
       return;
     }
 
@@ -126,7 +125,7 @@ async function handler(req, res) {
       const date = dateMatch[1];
       const rows = getProductProfitByDate(date);
       const records = rows.map(mapRow);
-      sendJson(res, { date, records, count: records.length });
+      sendJson(req, res, { date, records, count: records.length });
       return;
     }
 
@@ -135,14 +134,14 @@ async function handler(req, res) {
       const start = url.searchParams.get('start');
       const end = url.searchParams.get('end');
       if (!start || !end) {
-        sendJson(res, { error: 'missing start or end param', usage: '/huice?start=YYYY-MM-DD&end=YYYY-MM-DD' }, 400);
+        sendJson(req, res, { error: 'missing start or end param', usage: '/huice?start=YYYY-MM-DD&end=YYYY-MM-DD' }, 400);
         return;
       }
 
       const Database = (await import('better-sqlite3')).default;
       const dbPath = getDbPath();
       if (!existsSync(dbPath)) {
-        sendJson(res, { records: [], count: 0, error: 'database not found' });
+        sendJson(req, res, { records: [], count: 0, error: 'database not found' });
         return;
       }
       const db = new Database(dbPath, { readonly: true });
@@ -152,96 +151,84 @@ async function handler(req, res) {
       db.close();
 
       const records = aggregateByProduct(rows.map(mapRow));
-      sendJson(res, { start, end, records, count: records.length });
+      sendJson(req, res, { start, end, records, count: records.length });
       return;
     }
 
     // === 店铺日报利润 ===
-    // GET /shop-profit?pddShopName=昀诺零食专营店&start=...&end=...
+    // GET /shop-profit?mallId=xxx&start=...&end=...
+    // 只用 mallId 查 pdd_shop_mapping,不做模糊匹配
     if (path === '/shop-profit') {
-      const pddShopName = url.searchParams.get('pddShopName') || '';
+      const mallId = url.searchParams.get('mallId');
       const start = url.searchParams.get('start');
       const end = url.searchParams.get('end');
-      if (!start || !end) {
-        sendJson(res, { error: 'missing start or end', status: 'no_mapping' }, 400);
+      if (!mallId || !start || !end) {
+        sendJson(req, res, { error: 'missing mallId, start or end', status: 'no_mapping' }, 400);
         return;
       }
 
-      // 用 pddShopName 匹配慧经营店铺
-      // 拼多多店铺名"昀诺零食专营店" -> 慧经营店铺名"拼【昀诺食品"
-      // 拼多多店铺名"贝鲜速食品专营店" -> 慧经营店铺名"拼【贝鲜食品"
+      // 只通过 pdd_shop_mapping 查映射,不模糊匹配
+      const mapping = getPddShopMapping(mallId);
+      if (!mapping) {
+        sendJson(req, res, { status: 'no_mapping', mapping: null, days: [] });
+        return;
+      }
+
       const Database = (await import('better-sqlite3')).default;
       const dbPath = getDbPath();
       if (!existsSync(dbPath)) {
-        sendJson(res, { status: 'no_mapping', mapping: null, days: [] });
+        sendJson(req, res, { status: 'no_mapping', mapping: null, days: [] });
         return;
       }
       const db = new Database(dbPath, { readonly: true });
 
-      let shopRow = null;
-      if (pddShopName) {
-        // 从拼多多店铺名提取关键词: 去掉常见后缀,取前 2-4 个字作为关键词
-        // "昀诺零食专营店" -> "昀诺", "贝鲜速食品专营店" -> "贝鲜速"
-        const cleaned = pddShopName
-          .replace(/(食品|零食|专营|旗舰|专卖|官方|总动员|大卖场|卖场|专营店|旗舰店|专卖店|店|铺)/g, '')
-          .trim();
-        // 取前 2 个字作为关键词(足够区分大多数店铺)
-        const keyword = cleaned.slice(0, 2);
-        if (keyword) {
-          // 只匹配"拼"开头的(拼多多店铺),排除淘宝/天猫/抖音等
-          shopRow = db.prepare("SELECT s.shop_id, s.huice_name FROM shops s WHERE s.huice_name LIKE ? AND s.huice_name LIKE '拼%' ORDER BY LENGTH(s.huice_name) ASC LIMIT 1").get('%' + keyword + '%');
-        }
-        // 精确匹配(也只匹配拼多多的)
-        if (!shopRow) {
-          shopRow = db.prepare("SELECT s.shop_id, s.huice_name FROM shops s WHERE (s.huice_name = ? OR s.shop_name = ?) AND s.huice_name LIKE '拼%' LIMIT 1").get(pddShopName, pddShopName);
-        }
-      }
-      // fallback: 找有数据的拼多多店铺(只找"拼"开头的)
-      if (!shopRow) {
-        shopRow = db.prepare("SELECT s.shop_id, s.huice_name FROM shop_daily_profit d JOIN shops s ON s.shop_id = d.shop_id WHERE s.huice_name LIKE '拼%' AND d.date BETWEEN ? AND ? LIMIT 1").get(start, end);
-      }
+      // 读慧经营店铺日报
+      const shopRows = db.prepare('SELECT * FROM shop_daily_profit WHERE shop_id = ? AND date BETWEEN ? AND ? ORDER BY date').all(mapping.huice_shop_id, start, end);
+
+      // 读拼多多推广数据(独立表,不覆盖慧经营)
+      const promoRows = db.prepare('SELECT * FROM pdd_promo_daily WHERE shop_id = ? AND date BETWEEN ? AND ? ORDER BY date').all(mapping.huice_shop_id, start, end);
+      const huiceShop = db.prepare('SELECT huice_name FROM shops WHERE shop_id = ?').get(mapping.huice_shop_id);
       db.close();
 
-      if (!shopRow) {
-        sendJson(res, { status: 'no_mapping', mapping: null, days: [] });
-        return;
-      }
-
-      const Database2 = (await import('better-sqlite3')).default;
-      const db2 = new Database2(dbPath, { readonly: true });
-      const shopRows = db2.prepare('SELECT * FROM shop_daily_profit WHERE shop_id = ? AND date BETWEEN ? AND ? ORDER BY date').all(shopRow.shop_id, start, end);
-      db2.close();
-
-      const rowsByDate = new Map(shopRows.map(r => [r.date, r]));
-      const filledDays = fillDateRange({ start, end, rowsByDate });
+      const shopByDate = new Map(shopRows.map(r => [r.date, r]));
+      const promoByDate = new Map(promoRows.map(r => [r.date, r]));
+      const filledDays = fillDateRange({ start, end, rowsByDate: shopByDate });
 
       const days = filledDays.map(day => {
         if (day.missing) {
           return { date: day.date, missing: true };
         }
-        // 用拼多多推广费重新算费比和ROI(慧经营推广费=0,用拼多多采集的)
-        const promoSpend = day.promo_spend;
+        // 慧经营数据
         const salesAmount = day.sales_amount;
+        const netProfit = day.net_profit;
+        const netProfitRate = day.net_profit_rate;
+        // 拼多多推广数据(从独立表读)
+        const promo = promoByDate.get(day.date);
+        const promoSpend = promo?.promo_spend ?? null;
+        const roi = promo?.roi ?? null;
+        // 用拼多多推广费算费比
         const promoFeeRatio = (promoSpend != null && salesAmount > 0) ? promoSpend / salesAmount : null;
-        const roi = (promoSpend > 0 && salesAmount != null) ? salesAmount / promoSpend : null;
-        return buildStoreReportDay({
+        const breakEvenRoi = netProfitRate && netProfitRate > 0 ? 1 / netProfitRate : null;
+
+        return {
           date: day.date,
-          shop: {
-            salesAmount: day.sales_amount,
-            promoSpend: promoSpend,
-            netProfit: day.net_profit,
-            netProfitRate: day.net_profit_rate,
-            promoFeeRatio: promoFeeRatio,  // 用拼多多推广费算
-            roi: roi,  // 用拼多多推广费算
-          },
-        });
+          salesAmount,
+          promoSpend,
+          roi,
+          breakEvenRoi,
+          promoFeeRatio,
+          netProfitRate,
+          netProfit,
+          isLoss: netProfit != null && netProfit < 0,
+        };
       });
 
-      sendJson(res, {
+      sendJson(req, res, {
         status: 'ok',
         mapping: {
-          huiceShopId: shopRow.shop_id,
-          huiceShopName: shopRow.huice_name,
+          pddMallId: mapping.pdd_mall_id,
+          huiceShopId: mapping.huice_shop_id,
+          huiceShopName: huiceShop?.huice_name || '',
         },
         days,
       });
@@ -258,26 +245,23 @@ async function handler(req, res) {
 
       const { mallId, pddShopName, productIds } = body;
       if (!mallId || !productIds || !Array.isArray(productIds)) {
-        sendJson(res, { error: 'missing mallId or productIds' }, 400);
+        sendJson(req, res, { error: 'missing mallId or productIds' }, 400);
         return;
       }
 
       const candidates = findShopCandidatesByProductIds(productIds);
-      if (candidates.length === 0) {
-        sendJson(res, { status: 'none', candidates: [] });
-      } else if (candidates.length === 1) {
+      const decision = decideShopMapping(candidates);
+      if (decision.status === 'unique') {
         upsertPddShopMapping({
           pddMallId: mallId,
           pddShopName: pddShopName || '',
-          huiceShopId: candidates[0].shop_id,
+          huiceShopId: decision.candidate.shop_id,
           matchMethod: 'product_id_auto',
-          matchedProductCount: candidates[0].matched_product_count,
+          matchedProductCount: decision.candidate.matched_product_count,
           status: 'confirmed',
         });
-        sendJson(res, { status: 'unique', candidates });
-      } else {
-        sendJson(res, { status: 'ambiguous', candidates });
       }
+      sendJson(req, res, { status: decision.status, candidates });
       return;
     }
 
@@ -291,7 +275,7 @@ async function handler(req, res) {
 
       const { mallId, pddShopName, huiceShopId } = body;
       if (!mallId || !huiceShopId) {
-        sendJson(res, { error: 'missing mallId or huiceShopId' }, 400);
+        sendJson(req, res, { error: 'missing mallId or huiceShopId' }, 400);
         return;
       }
 
@@ -302,15 +286,15 @@ async function handler(req, res) {
         matchMethod: 'manual',
         status: 'confirmed',
       });
-      sendJson(res, { status: 'ok' });
+      sendJson(req, res, { status: 'ok' });
       return;
     }
 
     // 404
-    sendJson(res, { error: 'not found', paths: ['/health', '/huice/:date', '/huice?start=...&end=...', '/huice/dates', '/shop-profit', '/shop-mapping/candidates', '/shop-mapping/confirm'] }, 404);
+    sendJson(req, res, { error: 'not found', paths: ['/health', '/huice/:date', '/huice?start=...&end=...', '/huice/dates', '/shop-profit', '/shop-mapping/candidates', '/shop-mapping/confirm'] }, 404);
   } catch (e) {
     console.error(`[error] ${e.message}`);
-    sendJson(res, { error: e.message }, 500);
+    sendJson(req, res, { error: e.message }, 500);
   }
 }
 

@@ -51,6 +51,8 @@ node tools/huice-shop-export-cdp.mjs --days 30
 node tools/pdd-promo-cdp.mjs --days 30
 ```
 
+推广费采集读取当前登录的拼多多店铺。首次打开“店铺报表”时，扩展只会用已经显示慧经营利润的商品 ID 建立店铺映射；唯一候选会自动确认，多个候选不会猜测，需要人工确认后再采集推广费。
+
 ### 第 5 步：打开拼多多看效果
 
 打开 `https://yingxiao.pinduoduo.com/goods/report/promotion/overView`

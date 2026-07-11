@@ -18,6 +18,8 @@ import { execSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bulkUpsertProductProfit, getDbPath } from '../scripts/huice/lib/db.mjs';
+import { collectorExitCode, createCollectorResult, markCollectorFailure } from '../scripts/huice/lib/collector-result.mjs';
+import { isExpectedExportTask } from '../scripts/huice/lib/export-validation.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -35,7 +37,7 @@ for (let i = 0; i < args.length; i++) {
 function dateStr(offset = 0) {
   const d = new Date();
   d.setDate(d.getDate() + offset);
-  return d.toISOString().slice(0, 10);
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -206,6 +208,11 @@ import openpyxl, json, sys
 wb = openpyxl.load_workbook('${xlsxPath}')
 ws = wb.active
 rows = list(ws.iter_rows(values_only=True))
+all_text = '\\n'.join(' '.join(str(c) for c in row if c is not None) for row in rows)
+if '${targetDate}' not in all_text and '${targetDate.replace(/-/g, '/')}' not in all_text:
+    raise ValueError('target date missing from export')
+if not any(any('商品ID' in str(c) or '商品编号' in str(c) for c in row if c is not None) for row in rows):
+    raise ValueError('product ID header missing from export')
 records = []
 for row in rows[11:]:
     if not row[2]:
@@ -219,8 +226,15 @@ for row in rows[11:]:
         try: return float(s)
         except: return None
     def pp(v):
+        # 百分比转小数: "12.50%"->0.125, 12.5->0.125, 0.125->0.125
+        if v is None: return None
+        s = str(v)
+        has_percent = '%' in s
         n = pn(v)
-        return n/100 if n is not None else None
+        if n is None: return None
+        if has_percent: return n / 100
+        if n > 1 or n < -1: return n / 100
+        return n
     # 慧经营原始净利额
     raw_net_profit = pn(row[15])
     raw_net_profit_rate = pp(row[16])
@@ -270,6 +284,7 @@ print(json.dumps(records))
 }
 
 async function main() {
+  const result = createCollectorResult();
   if (!existsSync(OUTPUT_DIR)) mkdirSync(OUTPUT_DIR, { recursive: true });
 
   // 日期列表:--dates 优先,否则按 --days 生成
@@ -283,7 +298,11 @@ async function main() {
   // 找 hjy 标签页
   const tabs = await (await fetch('http://127.0.0.1:9222/json/list')).json();
   const hjyTab = tabs.find(t => t.type === 'page' && t.url.includes('hjy.huice.com'));
-  if (!hjyTab) { console.error('❌ 没找到 hjy.huice.com 标签页'); process.exit(1); }
+  if (!hjyTab) {
+    console.error('❌ 没找到 hjy.huice.com 标签页');
+    result.fatalError = new Error('hjy tab not found');
+    return result;
+  }
 
   const ws = new WebSocket(hjyTab.webSocketDebuggerUrl);
   await new Promise((r, rej) => { ws.addEventListener('open', r, { once: true }); ws.addEventListener('error', rej, { once: true }); setTimeout(rej, 5000); });
@@ -297,7 +316,7 @@ async function main() {
   }
 
   const allRecords = [];
-  const failedDates = [];
+  const failedDates = result.failedDates;
 
   for (let i = 0; i < dateList.length; i++) {
     const targetDate = dateList[i];
@@ -328,7 +347,7 @@ async function main() {
     if (!dateOk) {
       console.log(`  ❌ 日期切换 3 次均失败,跳过 ${targetDate}`);
       // 记录失败日期,供后续补采
-      failedDates.push(targetDate);
+      markCollectorFailure(result, targetDate, 'date selection failed');
       continue;
     }
 
@@ -357,6 +376,7 @@ async function main() {
     await sleep(1500);
 
     // 4. 点「导出全部」
+    const exportRequestedAt = Date.now();
     await cdpEval(ws, `(() => {
       const items = [...document.querySelectorAll('.el-popover *')];
       const exportAll = items.find(el => (el.innerText || '').trim() === '导出全部');
@@ -382,31 +402,52 @@ async function main() {
 
     const beforeMtime = Date.now();
 
-    // 点第一行 operation 列的下载 button
-    await cdpEval(ws, `(() => {
+    // 只下载本次导出后生成的商品排名任务，禁止按第一行猜测。
+    const tasks = await cdpEval(ws, `(() => {
       const grid = document.querySelector('.ag-root');
-      if (!grid) return 'no grid';
-      const firstRow = grid.querySelector('.ag-center-cols-container .ag-row');
-      if (!firstRow) return 'no row';
-      const cells = [...firstRow.querySelectorAll('.ag-cell')];
-      const opCell = cells.find(c => c.getAttribute('col-id') === 'operation');
-      if (!opCell) return 'no operation cell';
-      const btn = opCell.querySelector('button');
-      if (!btn) return 'no button';
+      if (!grid) return [];
+      return [...grid.querySelectorAll('.ag-center-cols-container .ag-row')].map(row => ({
+        rowIndex: row.getAttribute('row-index'),
+        text: row.innerText || '',
+      }));
+    })()`);
+    const task = Array.isArray(tasks) && tasks.find(candidate =>
+      isExpectedExportTask(candidate, { kind: 'product', targetDate, after: exportRequestedAt })
+    );
+    const downloadResult = task ? await cdpEval(ws, `(() => {
+      const row = [...document.querySelectorAll('.ag-center-cols-container .ag-row')]
+        .find(item => item.getAttribute('row-index') === ${JSON.stringify(task.rowIndex)});
+      const opCell = [...(row?.querySelectorAll('.ag-cell') || [])]
+        .find(cell => cell.getAttribute('col-id') === 'operation');
+      const btn = opCell?.querySelector('button');
+      if (!btn) return 'no matching task button';
       btn.click();
       return 'ok';
-    })()`);
+    })()`) : 'no matching task';
+    if (downloadResult !== 'ok') {
+      console.log(`  ⚠️ 下载中心没有匹配任务,跳过`);
+      markCollectorFailure(result, targetDate, 'matching download task not found');
+      continue;
+    }
 
     // 等下载完成
     const xlsxPath = await waitForNewXlsx(beforeMtime, 60000);
     if (!xlsxPath) {
       console.log(`  ⚠️ 下载超时,跳过`);
+      markCollectorFailure(result, targetDate, 'download timeout');
       continue;
     }
     console.log(`  📄 下载完成: ${path.basename(xlsxPath)}`);
 
-    // 6. 解析 xlsx
-    const records = parseXlsx(xlsxPath, targetDate);
+    // 6. 解析并校验 xlsx
+    let records;
+    try {
+      records = parseXlsx(xlsxPath, targetDate);
+    } catch (error) {
+      console.log(`  ⚠️ xlsx 校验失败: ${error.message}`);
+      markCollectorFailure(result, targetDate, 'xlsx validation failed');
+      continue;
+    }
     const netProfitCount = records.filter(r => r.netProfit != null).length;
     console.log(`  ✅ ${records.length} 条 (netProfit 有值: ${netProfitCount})`);
 
@@ -431,6 +472,7 @@ async function main() {
       console.log(`\n📦 SQLite 入库 ${inserted} 条 -> ${getDbPath()}`);
     } catch (e) {
       console.log(`⚠️ SQLite 入库失败: ${e.message}`);
+      result.fatalError = e;
     }
   }
 
@@ -447,6 +489,7 @@ async function main() {
     console.log(`   失败日期: ${failedDates.join(', ')}`);
     console.log(`   补采命令: node tools/huice-export-cdp.mjs --dates ${failedDates.join(',')}`);
   }
+  return result;
 }
 
-main().catch(e => { console.error('❌', e.message); process.exit(1); });
+main().then(result => { process.exit(collectorExitCode(result)); }).catch(e => { console.error("❌", e.message); process.exit(1); });

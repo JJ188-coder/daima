@@ -66,4 +66,20 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+# 5. 店铺维度日报
+Log "🏪 采集店铺日报..."
+node tools\huice-shop-export-cdp.mjs --days 1
+if ($LASTEXITCODE -ne 0) {
+    Log "❌ huice-shop-export-cdp 失败"
+    exit 1
+}
+
+# 6. 拼多多推广费（当前登录店铺）
+Log "📣 采集拼多多推广费..."
+node tools\pdd-promo-cdp.mjs --days 1
+if ($LASTEXITCODE -ne 0) {
+    Log "❌ pdd-promo-cdp 失败"
+    exit 1
+}
+
 Log "✅ 每日同步完成"

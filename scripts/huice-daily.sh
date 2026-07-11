@@ -53,9 +53,13 @@ node tools/huice-export-cdp.mjs --days 1
 echo "$LOG_PREFIX 📤 写入 dts storage..."
 node tools/write-storage.mjs --days 1
 
-# 5. 店铺维度日报(失败不影响商品同步)
+# 5. 店铺维度日报
 YESTERDAY=$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d "yesterday" +%Y-%m-%d)
 echo "$LOG_PREFIX 🏪 采集店铺日报 $YESTERDAY ..."
-node "$PROJECT_DIR/tools/huice-shop-export-cdp.mjs" --dates "$YESTERDAY" || echo "$LOG_PREFIX ⚠️ 店铺日报采集失败,不影响商品数据"
+node "$PROJECT_DIR/tools/huice-shop-export-cdp.mjs" --dates "$YESTERDAY"
+
+# 6. 拼多多推广费（当前登录店铺）
+echo "$LOG_PREFIX 📣 采集拼多多推广费 $YESTERDAY ..."
+node "$PROJECT_DIR/tools/pdd-promo-cdp.mjs" --dates "$YESTERDAY"
 
 echo "$LOG_PREFIX ✅ 每日同步完成"
