@@ -798,7 +798,9 @@ async function getPromoDataByWindow(window) {
     }
 
     // === 店铺报表逐日利润面板 ===
-    tryRenderShopProfitPanel();
+    // 延迟渲染,等 collectMatchedReportRecords 完成后再触发(它可能还在 async 执行中)
+    setTimeout(() => tryRenderShopProfitPanel(), 500);
+    setTimeout(() => tryRenderShopProfitPanel(), 3000);
 
     return { vueFilled: vueResult.filled, vueMatched: vueResult.matched };
   }

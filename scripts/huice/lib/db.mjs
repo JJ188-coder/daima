@@ -508,18 +508,21 @@ export function getPddShopMapping(pddMallId) {
   return db.prepare('SELECT * FROM pdd_shop_mapping WHERE pdd_mall_id = ?').get(pddMallId);
 }
 
-/** 用商品 ID 反查慧经营店铺候选 */
+/** 用商品 ID 反查慧经营店铺候选(只返回拼多多店铺,按匹配数排序) */
 export function findShopCandidatesByProductIds(productIds) {
   if (!productIds || productIds.length === 0) return [];
   const db = getDb();
   const placeholders = productIds.map(() => '?').join(',');
   // product_profit.shop_id 可能为 null,用 shop_name 关联 shops.huice_name
+  // 只返回拼多多店铺(huice_name LIKE '拼%'),排除淘宝/天猫等
   return db.prepare(`
     SELECT s.shop_id, s.huice_name AS shop_name, COUNT(DISTINCT p.product_id) AS matched_product_count
     FROM product_profit p
     JOIN shops s ON s.huice_name = p.shop_name
     WHERE p.product_id IN (${placeholders})
+      AND s.huice_name LIKE '拼%'
     GROUP BY s.shop_id, s.huice_name
+    HAVING matched_product_count >= 2
     ORDER BY matched_product_count DESC, s.huice_name ASC
   `).all(...productIds);
 }
