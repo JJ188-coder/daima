@@ -17,6 +17,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { upsertPddPromoDaily, getPddShopMapping } from '../scripts/huice/lib/db.mjs';
+import { collectorExitCode, createCollectorResult, hasCompletePromoMetrics, markCollectorFailure } from '../scripts/huice/lib/collector-result.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -188,7 +189,12 @@ function updatePromoSpend(date, promoData, mallId) {
 }
 
 async function main() {
-  if (!existsSync(DB_PATH)) { console.error('❌ 数据库不存在:', DB_PATH); process.exit(1); }
+  const result = createCollectorResult();
+  if (!existsSync(DB_PATH)) {
+    console.error('❌ 数据库不存在:', DB_PATH);
+    result.fatalError = new Error('database not found');
+    return result;
+  }
 
   const dateList = customDates.length > 0
     ? customDates.sort()
@@ -214,7 +220,11 @@ async function main() {
     }
   }
 
-  if (!pddTab) { console.error('❌ 没找到拼多多推广平台标签页'); process.exit(1); }
+  if (!pddTab) {
+    console.error('❌ 没找到拼多多推广平台标签页');
+    result.fatalError = new Error('PDD promotion tab not found');
+    return result;
+  }
 
   const ws = new WebSocket(pddTab.webSocketDebuggerUrl);
   await new Promise((r, rej) => { ws.addEventListener('open', r, { once: true }); ws.addEventListener('error', rej, { once: true }); setTimeout(rej, 5000); });
@@ -225,7 +235,8 @@ async function main() {
   if (!mallId) {
     console.error('❌ 无法从页面提取 mallId,退出');
     ws.close();
-    process.exit(1);
+    result.fatalError = new Error('mallId not found');
+    return result;
   }
   console.log(`✅ mallId=${mallId}`);
 
@@ -233,11 +244,12 @@ async function main() {
   if (!mapping) {
     console.error(`❌ mallId=${mallId} 在 pdd_shop_mapping 中没有映射,退出`);
     ws.close();
-    process.exit(1);
+    result.fatalError = new Error('shop mapping not found');
+    return result;
   }
   console.log(`✅ 映射到慧经营店铺: shopId=${mapping.huice_shop_id} name=${mapping.pdd_shop_name}`);
 
-  const failedDates = [];
+  const failedDates = result.failedDates;
 
   for (let i = 0; i < dateList.length; i++) {
     const targetDate = dateList[i];
@@ -261,7 +273,7 @@ async function main() {
     }
     if (!dateOk) {
       console.log(`  ❌ 日期切换失败,跳过`);
-      failedDates.push(targetDate);
+      markCollectorFailure(result, targetDate, 'date selection failed');
       continue;
     }
     console.log(`  ✅ 日期已切换`);
@@ -279,9 +291,9 @@ async function main() {
 
     // 4. 读推广费
     const promo = await readPromoData(ws);
-    if (!promo || promo.promoSpend == null) {
-      console.log(`  ⚠️ 读不到推广费数据`);
-      failedDates.push(targetDate);
+    if (!hasCompletePromoMetrics(promo)) {
+      console.log(`  ⚠️ 读不到完整推广数据（推广费或 ROI 缺失）`);
+      markCollectorFailure(result, targetDate, 'promotion metrics incomplete');
       continue;
     }
     console.log(`  📊 推广费=¥${promo.promoSpend} 交易额=¥${promo.gmv} ROI=${promo.roi} 店铺=${promo.shopName}`);
@@ -292,6 +304,7 @@ async function main() {
       console.log(`  ✅ 已更新 pdd_promo_daily`);
     } else {
       console.log(`  ⚠️ 未匹配到慧经营店铺,跳过`);
+      markCollectorFailure(result, targetDate, 'shop mapping unavailable');
     }
   }
 
@@ -300,6 +313,7 @@ async function main() {
   if (failedDates.length > 0) {
     console.log(`⚠️ ${failedDates.length} 天失败: ${failedDates.join(', ')}`);
   }
+  return result;
 }
 
-main().then(() => { process.exit(0); }).catch(e => { console.error("❌", e.message); process.exit(1); });
+main().then(result => { process.exit(collectorExitCode(result)); }).catch(e => { console.error("❌", e.message); process.exit(1); });

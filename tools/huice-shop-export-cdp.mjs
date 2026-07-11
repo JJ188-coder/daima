@@ -26,6 +26,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseShopExportRows } from '../scripts/huice/lib/shop-profit.mjs';
 import { upsertShop, upsertShopDailyProfit, getDbPath } from '../scripts/huice/lib/db.mjs';
+import { collectorExitCode, createCollectorResult, markCollectorFailure } from '../scripts/huice/lib/collector-result.mjs';
+import { isExpectedExportTask, validateExportRows } from '../scripts/huice/lib/export-validation.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -384,7 +386,7 @@ async function clickExport(ws) {
 }
 
 /** 去下载中心,等新任务出现再下载 */
-async function downloadFromCenter(ws) {
+async function downloadFromCenter(ws, targetDate, exportRequestedAt) {
   // 去下载中心
   await cdpEval(ws, `location.href = "${DOWNLOAD_CENTER_URL}"`);
   await sleep(3000);
@@ -413,17 +415,24 @@ async function downloadFromCenter(ws) {
     // 每轮先关通知
     await cdpEval(ws, `(() => { [...document.querySelectorAll('button')].forEach(b => { if ((b.innerText||'').includes('我知道了')) b.click(); }); return 'ok'; })()`);
 
-    result = await cdpEval(ws, `(() => {
-      // 找所有"下载"按钮(文字匹配)
-      const btns = [...document.querySelectorAll('button')].filter(b => b.offsetParent !== null);
-      const dlBtns = btns.filter(b => (b.innerText || '').trim() === '下载');
-      if (dlBtns.length > 0) {
-        // 点第一个下载按钮(最新的任务在第一行)
-        dlBtns[0].click();
-        return 'ok';
-      }
-      return 'no download btn';
-    })()`);
+    const tasks = await cdpEval(ws, `(() =>
+      [...document.querySelectorAll('.ag-row')].map(row => ({
+        rowIndex: row.getAttribute('row-index'),
+        text: row.innerText || '',
+      }))
+    )()`);
+    const task = Array.isArray(tasks) && tasks.find(candidate =>
+      isExpectedExportTask(candidate, { kind: 'shop', targetDate, after: exportRequestedAt })
+    );
+    result = task ? await cdpEval(ws, `(() => {
+      const row = [...document.querySelectorAll('.ag-row')]
+        .find(item => item.getAttribute('row-index') === ${JSON.stringify(task.rowIndex)});
+      const btn = [...(row?.querySelectorAll('button') || [])]
+        .find(item => (item.innerText || '').trim() === '下载' && item.offsetParent !== null);
+      if (!btn) return 'no matching download task button';
+      btn.click();
+      return 'ok';
+    })()`) : 'no matching download task';
     
     if (result === 'ok') {
       console.log(`  ✅ 下载中心: 找到下载按钮并点击`);
@@ -448,7 +457,7 @@ async function downloadFromCenter(ws) {
     console.log(`  ⚠ 下载中心: 未找到下载按钮`);
   }
 
-  return beforeMtime;
+  return { beforeMtime, result };
 }
 
 /** 等待新的 xlsx 下载完成（检测 Downloads 目录中新出现的 .xlsx 文件） */
@@ -485,13 +494,8 @@ function parseXlsxRaw(xlsxPath) {
     'wb = openpyxl.load_workbook(sys.argv[1])',
     'ws = wb.active',
     'rows = list(ws.iter_rows(values_only=True))',
-    'header_idx = 0',
-    'for i, row in enumerate(rows):',
-    '    if any(c is not None and "店铺名称" in str(c) for c in row):',
-    '        header_idx = i',
-    '        break',
     'result = []',
-    'for row in rows[header_idx:]:',
+    'for row in rows:',
     '    result.append([str(c) if c is not None else "" for c in row])',
     'print(json.dumps(result, ensure_ascii=False))',
   ].join('\n');
@@ -527,6 +531,7 @@ function insertRecords(records) {
 // ============ 主流程 ============
 
 async function main() {
+  const result = createCollectorResult();
   if (!existsSync(OUTPUT_DIR)) mkdirSync(OUTPUT_DIR, { recursive: true });
 
   // 解析命令行参数
@@ -547,7 +552,11 @@ async function main() {
   // 找 hjy 标签页
   const tabs = await (await fetch('http://127.0.0.1:9222/json/list')).json();
   const hjyTab = tabs.find(t => t.type === 'page' && t.url.includes('hjy.huice.com'));
-  if (!hjyTab) { console.error('❌ 没找到 hjy.huice.com 标签页'); process.exit(1); }
+  if (!hjyTab) {
+    console.error('❌ 没找到 hjy.huice.com 标签页');
+    result.fatalError = new Error('hjy tab not found');
+    return result;
+  }
 
   const ws = new WebSocket(hjyTab.webSocketDebuggerUrl);
   await new Promise((r, rej) => {
@@ -558,7 +567,7 @@ async function main() {
   console.log(`✅ CDP 已连接`);
 
   const allRecords = [];
-  const failedDates = [];
+  const failedDates = result.failedDates;
 
   for (let i = 0; i < dateList.length; i++) {
     const targetDate = dateList[i];
@@ -592,29 +601,33 @@ async function main() {
       }
       if (!dateOk) {
         console.log(`  ❌ 日期切换 3 次均失败,跳过 ${targetDate}`);
-        failedDates.push(targetDate);
+        markCollectorFailure(result, targetDate, 'date selection failed');
         continue;
       }
 
-      // 4. 选所有拼多多店铺(只有第一次需要,后续切日期+查询就行)
-      if (i === 0) {
-        await selectAllPddShops(ws);
-      }
+      // 4. 每次导航后重新筛选拼多多店铺，页面重载不会保留上一次的选择。
+      await selectAllPddShops(ws);
 
       // 5. 点查询
       await clickQuery(ws);
 
       // 6. 点导出 -> 处理弹窗
+      const exportRequestedAt = Date.now();
       await clickExport(ws);
 
       // 7. 去下载中心下载 xlsx
-      const beforeMtime = await downloadFromCenter(ws);
+      const download = await downloadFromCenter(ws, targetDate, exportRequestedAt);
+      if (download.result !== 'ok') {
+        console.log(`  ⚠️ 下载中心没有匹配任务,跳过`);
+        markCollectorFailure(result, targetDate, 'matching download task not found');
+        continue;
+      }
 
       // 8. 等下载完成
-      const xlsxPath = await waitForNewXlsx(beforeMtime, 60000);
+      const xlsxPath = await waitForNewXlsx(download.beforeMtime, 60000);
       if (!xlsxPath) {
         console.log(`  ⚠️ 下载超时,跳过`);
-        failedDates.push(targetDate);
+        markCollectorFailure(result, targetDate, 'download timeout');
         continue;
       }
       console.log(`  📄 下载完成: ${path.basename(xlsxPath)}`);
@@ -622,13 +635,20 @@ async function main() {
       // 9. 解析 xlsx
       const rawRows = parseXlsxRaw(xlsxPath);
 
+      const validation = validateExportRows(rawRows, { kind: 'shop', targetDate });
+      if (!validation.ok) {
+        console.log(`  ⚠️ xlsx 校验失败: ${validation.reason},跳过`);
+        markCollectorFailure(result, targetDate, validation.reason);
+        continue;
+      }
+
       // 9.1 验证 xlsx 里的时间范围是否跟目标日期一致
       const titleStr = String(rawRows[0]?.[0] || '');
       const xlsxDateMatch = titleStr.match(/时间范围[：:]\s*(\d{4}-\d{2}-\d{2})/);
       const xlsxDate = xlsxDateMatch ? xlsxDateMatch[1] : '';
       if (xlsxDate && xlsxDate !== targetDate) {
         console.log(`  ⚠️ xlsx 时间范围是 ${xlsxDate}, 不是 ${targetDate}, 日期切换失败,跳过`);
-        failedDates.push(targetDate);
+        markCollectorFailure(result, targetDate, 'export date mismatch');
         continue;
       }
 
@@ -654,12 +674,13 @@ async function main() {
           console.log(`  📦 SQLite 入库 ${inserted} 条 -> ${getDbPath()}`);
         } catch (e) {
           console.log(`  ⚠️ SQLite 入库失败: ${e.message}`);
+          markCollectorFailure(result, targetDate, 'SQLite insert failed');
         }
       }
 
     } catch (e) {
       console.log(`  ❌ 采集失败: ${e.message}`);
-      failedDates.push(targetDate);
+      markCollectorFailure(result, targetDate, e.message);
     }
   }
 
@@ -679,6 +700,7 @@ async function main() {
     console.log(`   失败日期: ${failedDates.join(', ')}`);
     console.log(`   补采命令: node tools/huice-shop-export-cdp.mjs --dates ${failedDates.join(',')}`);
   }
+  return result;
 }
 
-main().then(() => { process.exit(0); }).catch(e => { console.error("❌", e.message); process.exit(1); });
+main().then(result => { process.exit(collectorExitCode(result)); }).catch(e => { console.error("❌", e.message); process.exit(1); });

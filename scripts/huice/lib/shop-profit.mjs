@@ -130,7 +130,7 @@ export function parseShopExportRows(rows, date) {
   if (!rows || rows.length < 2) return [];
   // 找表头行: 第一行可能是标题信息,真正的表头是含"店铺名称"的行
   let headerIdx = 0;
-  for (let i = 0; i < Math.min(5, rows.length); i++) {
+  for (let i = 0; i < rows.length; i++) {
     if (rows[i].some(c => String(c).trim() === '店铺名称')) {
       headerIdx = i;
       break;

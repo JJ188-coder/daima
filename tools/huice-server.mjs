@@ -29,6 +29,8 @@ import {
 } from '../scripts/huice/lib/db.mjs';
 import { aggregateProfitRecords } from '../scripts/huice/lib/profit.mjs';
 import { buildStoreReportDay, fillDateRange } from '../scripts/huice/lib/shop-profit.mjs';
+import { buildCorsHeaders } from '../scripts/huice/lib/http-security.mjs';
+import { decideShopMapping } from '../scripts/huice/lib/shop-mapping.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.HUICE_SERVER_PORT || '9911', 10);
@@ -69,13 +71,11 @@ function aggregateByProduct(records) {
 }
 
 // CORS + JSON 响应
-function sendJson(res, data, status = 200) {
+function sendJson(req, res, data, status = 200) {
   const body = JSON.stringify(data);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
-    'Access-Control-Allow-Origin': 'http://127.0.0.1:*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    ...buildCorsHeaders(req.headers.origin),
   });
   res.end(body);
 }
@@ -87,7 +87,7 @@ async function handler(req, res) {
 
   // OPTIONS 预检
   if (req.method === 'OPTIONS') {
-    sendJson(res, { ok: true });
+    sendJson(req, res, { ok: true });
     return;
   }
 
@@ -95,7 +95,7 @@ async function handler(req, res) {
     // GET /health
     if (path === '/health') {
       const dbExists = existsSync(getDbPath());
-      sendJson(res, {
+      sendJson(req, res, {
         ok: true,
         db: dbExists ? getDbPath() : 'not found',
         port: PORT,
@@ -109,13 +109,13 @@ async function handler(req, res) {
       const Database = (await import('better-sqlite3')).default;
       const dbPath = getDbPath();
       if (!existsSync(dbPath)) {
-        sendJson(res, { dates: [], error: 'database not found' });
+        sendJson(req, res, { dates: [], error: 'database not found' });
         return;
       }
       const db = new Database(dbPath, { readonly: true });
       const rows = db.prepare('SELECT DISTINCT date FROM product_profit ORDER BY date DESC').all();
       db.close();
-      sendJson(res, { dates: rows.map(r => r.date) });
+      sendJson(req, res, { dates: rows.map(r => r.date) });
       return;
     }
 
@@ -125,7 +125,7 @@ async function handler(req, res) {
       const date = dateMatch[1];
       const rows = getProductProfitByDate(date);
       const records = rows.map(mapRow);
-      sendJson(res, { date, records, count: records.length });
+      sendJson(req, res, { date, records, count: records.length });
       return;
     }
 
@@ -134,14 +134,14 @@ async function handler(req, res) {
       const start = url.searchParams.get('start');
       const end = url.searchParams.get('end');
       if (!start || !end) {
-        sendJson(res, { error: 'missing start or end param', usage: '/huice?start=YYYY-MM-DD&end=YYYY-MM-DD' }, 400);
+        sendJson(req, res, { error: 'missing start or end param', usage: '/huice?start=YYYY-MM-DD&end=YYYY-MM-DD' }, 400);
         return;
       }
 
       const Database = (await import('better-sqlite3')).default;
       const dbPath = getDbPath();
       if (!existsSync(dbPath)) {
-        sendJson(res, { records: [], count: 0, error: 'database not found' });
+        sendJson(req, res, { records: [], count: 0, error: 'database not found' });
         return;
       }
       const db = new Database(dbPath, { readonly: true });
@@ -151,7 +151,7 @@ async function handler(req, res) {
       db.close();
 
       const records = aggregateByProduct(rows.map(mapRow));
-      sendJson(res, { start, end, records, count: records.length });
+      sendJson(req, res, { start, end, records, count: records.length });
       return;
     }
 
@@ -163,21 +163,21 @@ async function handler(req, res) {
       const start = url.searchParams.get('start');
       const end = url.searchParams.get('end');
       if (!mallId || !start || !end) {
-        sendJson(res, { error: 'missing mallId, start or end', status: 'no_mapping' }, 400);
+        sendJson(req, res, { error: 'missing mallId, start or end', status: 'no_mapping' }, 400);
         return;
       }
 
       // 只通过 pdd_shop_mapping 查映射,不模糊匹配
       const mapping = getPddShopMapping(mallId);
       if (!mapping) {
-        sendJson(res, { status: 'no_mapping', mapping: null, days: [] });
+        sendJson(req, res, { status: 'no_mapping', mapping: null, days: [] });
         return;
       }
 
       const Database = (await import('better-sqlite3')).default;
       const dbPath = getDbPath();
       if (!existsSync(dbPath)) {
-        sendJson(res, { status: 'no_mapping', mapping: null, days: [] });
+        sendJson(req, res, { status: 'no_mapping', mapping: null, days: [] });
         return;
       }
       const db = new Database(dbPath, { readonly: true });
@@ -187,6 +187,7 @@ async function handler(req, res) {
 
       // 读拼多多推广数据(独立表,不覆盖慧经营)
       const promoRows = db.prepare('SELECT * FROM pdd_promo_daily WHERE shop_id = ? AND date BETWEEN ? AND ? ORDER BY date').all(mapping.huice_shop_id, start, end);
+      const huiceShop = db.prepare('SELECT huice_name FROM shops WHERE shop_id = ?').get(mapping.huice_shop_id);
       db.close();
 
       const shopByDate = new Map(shopRows.map(r => [r.date, r]));
@@ -222,12 +223,12 @@ async function handler(req, res) {
         };
       });
 
-      sendJson(res, {
+      sendJson(req, res, {
         status: 'ok',
         mapping: {
           pddMallId: mapping.pdd_mall_id,
           huiceShopId: mapping.huice_shop_id,
-          huiceShopName: mapping.pdd_shop_name,
+          huiceShopName: huiceShop?.huice_name || '',
         },
         days,
       });
@@ -244,26 +245,23 @@ async function handler(req, res) {
 
       const { mallId, pddShopName, productIds } = body;
       if (!mallId || !productIds || !Array.isArray(productIds)) {
-        sendJson(res, { error: 'missing mallId or productIds' }, 400);
+        sendJson(req, res, { error: 'missing mallId or productIds' }, 400);
         return;
       }
 
       const candidates = findShopCandidatesByProductIds(productIds);
-      if (candidates.length === 0) {
-        sendJson(res, { status: 'none', candidates: [] });
-      } else if (candidates.length === 1) {
+      const decision = decideShopMapping(candidates);
+      if (decision.status === 'unique') {
         upsertPddShopMapping({
           pddMallId: mallId,
           pddShopName: pddShopName || '',
-          huiceShopId: candidates[0].shop_id,
+          huiceShopId: decision.candidate.shop_id,
           matchMethod: 'product_id_auto',
-          matchedProductCount: candidates[0].matched_product_count,
+          matchedProductCount: decision.candidate.matched_product_count,
           status: 'confirmed',
         });
-        sendJson(res, { status: 'unique', candidates });
-      } else {
-        sendJson(res, { status: 'ambiguous', candidates });
       }
+      sendJson(req, res, { status: decision.status, candidates });
       return;
     }
 
@@ -277,7 +275,7 @@ async function handler(req, res) {
 
       const { mallId, pddShopName, huiceShopId } = body;
       if (!mallId || !huiceShopId) {
-        sendJson(res, { error: 'missing mallId or huiceShopId' }, 400);
+        sendJson(req, res, { error: 'missing mallId or huiceShopId' }, 400);
         return;
       }
 
@@ -288,15 +286,15 @@ async function handler(req, res) {
         matchMethod: 'manual',
         status: 'confirmed',
       });
-      sendJson(res, { status: 'ok' });
+      sendJson(req, res, { status: 'ok' });
       return;
     }
 
     // 404
-    sendJson(res, { error: 'not found', paths: ['/health', '/huice/:date', '/huice?start=...&end=...', '/huice/dates', '/shop-profit', '/shop-mapping/candidates', '/shop-mapping/confirm'] }, 404);
+    sendJson(req, res, { error: 'not found', paths: ['/health', '/huice/:date', '/huice?start=...&end=...', '/huice/dates', '/shop-profit', '/shop-mapping/candidates', '/shop-mapping/confirm'] }, 404);
   } catch (e) {
     console.error(`[error] ${e.message}`);
-    sendJson(res, { error: e.message }, 500);
+    sendJson(req, res, { error: e.message }, 500);
   }
 }
 

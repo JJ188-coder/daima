@@ -768,10 +768,12 @@ async function getPromoDataByWindow(window) {
                   // 逐页收录已命中的慧经营记录
                   const collection = await collectMatchedReportRecords(dialog, huiceMap);
                   if (collection.ok) {
+                    latestMatchedHuiceProductIds = Array.from(collection.matchedRecords.keys());
                     const summaryResult = summarizeMatchedHuiceRecords(Array.from(collection.matchedRecords.values()));
                     fillShopSummaryRows(dataComp, renderData, summaryResult, collection.scannedProductIds.size);
                     console.log(HUICE_NS, '✓ shop summary: ' + summaryResult.matchedProductCount + ' matched / ' + collection.scannedProductIds.size + ' scanned');
                   } else {
+                    latestMatchedHuiceProductIds = [];
                     fillShopSummaryRows(dataComp, renderData, null, 0);
                     console.log(HUICE_NS, '⚠️ shop summary failed: ' + collection.reason);
                   }
@@ -781,6 +783,7 @@ async function getPromoDataByWindow(window) {
                     applyLossRowHighlight(dialog, currentPageData.renderData, huiceMap);
                   }
                 } else {
+                  latestMatchedHuiceProductIds = [];
                   fillShopSummaryRows(dataComp, renderData, null, 0);
                 }
                 try { tableComp.$forceUpdate(); dataComp.$forceUpdate(); } catch (e) {}
@@ -801,6 +804,8 @@ async function getPromoDataByWindow(window) {
   }
 
   // ============ 店铺报表逐日利润 ============
+
+  let latestMatchedHuiceProductIds = [];
 
   function tryRenderShopProfitPanel() {
     const dialog = document.querySelector('.el-dialog.dts-modal');
@@ -825,7 +830,7 @@ async function getPromoDataByWindow(window) {
     } catch(e) {}
 
     // 幂等: 面板已存在且日期范围+mallId没变就不重建
-    const panelKey = mallId + ':' + start + '~' + end;
+    const panelKey = mallId + ':' + start + '~' + end + ':' + latestMatchedHuiceProductIds.join(',');
     const existingPanel = dialog.querySelector('.dts-store-profit-panel');
     if (existingPanel && existingPanel.dataset.panelKey === panelKey) {
       return;
@@ -848,8 +853,8 @@ async function getPromoDataByWindow(window) {
     panel.innerHTML = '<div style="color:#722ed1;font-weight:600;">🏪 店铺逐日利润</div><div style="color:#999;padding:4px 0;">加载中...</div>';
 
     // 异步拉取数据(只用 mallId,不传 pddShopName)
-    fetchShopProfitRange(start, end, mallId).then(data => {
-      renderShopProfitPanel(panel, data, start, end);
+    fetchShopProfitWithMapping(start, end, mallId).then(data => {
+      renderShopProfitPanel(panel, data, start, end, mallId);
     }).catch(err => {
       panel.innerHTML = '<div style="color:#722ed1;font-weight:600;">🏪 店铺逐日利润</div><div style="color:#f5222d;padding:4px 0;">加载失败: ' + err.message + '</div>';
     });
@@ -862,13 +867,60 @@ async function getPromoDataByWindow(window) {
     return await resp.json();
   }
 
-  function renderShopProfitPanel(panel, data, start, end) {
+  async function fetchShopProfitWithMapping(start, end, mallId) {
+    let data = await fetchShopProfitRange(start, end, mallId);
+    if (data.status !== 'no_mapping') return data;
+
+    const productIds = latestMatchedHuiceProductIds;
+    if (!productIds.length) return { status: 'no_matched_products', mapping: null, days: [] };
+
+    const response = await fetch('http://127.0.0.1:9911/shop-mapping/candidates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mallId, pddShopName: document.title || '', productIds }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) throw new Error('mapping HTTP ' + response.status);
+    const mapping = await response.json();
+    if (mapping.status === 'unique') data = await fetchShopProfitRange(start, end, mallId);
+    return mapping.status === 'unique' ? data : { ...mapping, days: [] };
+  }
+
+  function renderShopProfitPanel(panel, data, start, end, mallId) {
     if (data.status === 'no_mapping') {
       panel.innerHTML = '<div style="color:#722ed1;font-weight:600;">🏪 店铺逐日利润</div><div style="color:#999;padding:4px 0;">未匹配到慧经营店铺,请先采集店铺数据</div>';
       return;
     }
+    if (data.status === 'no_matched_products') {
+      panel.innerHTML = '<div style="color:#722ed1;font-weight:600;">🏪 店铺逐日利润</div><div style="color:#999;padding:4px 0;">当前商品报表没有已匹配的慧经营商品，无法自动确认店铺</div>';
+      return;
+    }
     if (data.status === 'ambiguous') {
-      panel.innerHTML = '<div style="color:#722ed1;font-weight:600;">🏪 店铺逐日利润</div><div style="color:#faad14;padding:4px 0;">匹配到多个慧经营店铺,请确认映射</div>';
+      const candidates = Array.isArray(data.candidates) ? data.candidates : [];
+      const options = candidates.map(candidate =>
+        '<button type="button" data-huice-shop-id="' + String(candidate.shop_id) + '" style="margin:4px 6px 0 0;border:1px solid #722ed1;background:#fff;color:#722ed1;padding:3px 6px;cursor:pointer;">'
+        + escapeHtml(candidate.shop_name) + '（' + String(candidate.matched_product_count || 0) + ' 个商品）</button>'
+      ).join('');
+      panel.innerHTML = '<div style="color:#722ed1;font-weight:600;">🏪 店铺逐日利润</div><div style="color:#faad14;padding:4px 0;">匹配到多个慧经营店铺，请选择正确店铺</div><div>' + options + '</div>';
+      panel.querySelectorAll('[data-huice-shop-id]').forEach(button => {
+        button.addEventListener('click', async () => {
+          button.disabled = true;
+          try {
+            const response = await fetch('http://127.0.0.1:9911/shop-mapping/confirm', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ mallId, pddShopName: document.title || '', huiceShopId: button.dataset.huiceShopId }),
+              signal: AbortSignal.timeout(5000),
+            });
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            const refreshed = await fetchShopProfitRange(start, end, mallId);
+            renderShopProfitPanel(panel, refreshed, start, end, mallId);
+          } catch (error) {
+            button.disabled = false;
+            panel.innerHTML = '<div style="color:#722ed1;font-weight:600;">🏪 店铺逐日利润</div><div style="color:#f5222d;padding:4px 0;">确认映射失败: ' + escapeHtml(error.message) + '</div>';
+          }
+        });
+      });
       return;
     }
     if (!data.days || data.days.length === 0) {
@@ -880,7 +932,7 @@ async function getPromoDataByWindow(window) {
     const fmtPct = v => v == null ? '--' : (Number(v) * 100).toFixed(2) + '%';
     const fmtRatio = v => v == null ? '--' : Number(v).toFixed(2);
 
-    let html = '<div style="color:#722ed1;font-weight:600;margin-bottom:4px;">🏪 店铺逐日利润 (' + (data.mapping?.huiceShopName || '') + ')</div>';
+    let html = '<div style="color:#722ed1;font-weight:600;margin-bottom:4px;">🏪 店铺逐日利润 (' + escapeHtml(data.mapping?.huiceShopName || '') + ')</div>';
     html += '<table style="width:100%;border-collapse:collapse;font-size:12px;">';
     html += '<thead><tr style="background:#f9f0ff;">';
     html += '<th style="padding:4px 8px;border:1px solid #e8e8e8;text-align:left;">日期</th>';
@@ -913,6 +965,10 @@ async function getPromoDataByWindow(window) {
     html += '</tbody></table>';
 
     panel.innerHTML = html;
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
   }
 
   // ============ 慧经营利润数据：存储 & 读取 ============
