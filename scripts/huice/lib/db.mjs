@@ -98,9 +98,46 @@ function initSchema(db) {
       start_date    TEXT,
       end_date      TEXT,
       rows_fetched  INTEGER,
-      status        TEXT,                         -- success / partial / failed
+      status        TEXT,
       error         TEXT,
       created_at    TEXT DEFAULT (datetime('now'))
+    );
+  `);
+
+  // 店铺日报利润表(慧经营"按店铺展示"导出的真实费用)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS shop_daily_profit (
+      shop_id          INTEGER NOT NULL,
+      date             TEXT NOT NULL,
+      sales_amount     REAL,
+      promo_spend      REAL,
+      platform_fee     REAL,
+      labor_fee        REAL,
+      net_profit       REAL,
+      net_profit_rate  REAL,
+      promo_fee_ratio  REAL,
+      roi              REAL,
+      metrics_json     TEXT NOT NULL DEFAULT '{}',
+      raw_row_json     TEXT,
+      captured_at      TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (shop_id, date),
+      FOREIGN KEY (shop_id) REFERENCES shops(shop_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_shop_daily_profit_date ON shop_daily_profit(date);
+  `);
+
+  // 拼多多店铺映射表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pdd_shop_mapping (
+      pdd_mall_id           TEXT PRIMARY KEY,
+      pdd_shop_name         TEXT,
+      huice_shop_id         INTEGER NOT NULL,
+      match_method          TEXT NOT NULL DEFAULT 'product_id_auto' CHECK(match_method IN ('product_id_auto', 'manual')),
+      matched_product_count INTEGER NOT NULL DEFAULT 0,
+      status                TEXT NOT NULL DEFAULT 'confirmed',
+      created_at            TEXT DEFAULT (datetime('now')),
+      updated_at            TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (huice_shop_id) REFERENCES shops(shop_id)
     );
   `);
 }
@@ -210,9 +247,9 @@ export function upsertShop(huiceName) {
       updated_at = datetime('now')
   `);
   const info = stmt.run(huiceName, platform, shopName);
-  // 返回 shop_id(可能是新建的或已存在的)
-  const row = db.prepare('SELECT shop_id FROM shops WHERE huice_name = ?').get(huiceName);
-  return row.shop_id;
+  // 返回 shop 对象
+  const row = db.prepare('SELECT shop_id, huice_name, shop_name FROM shops WHERE huice_name = ?').get(huiceName);
+  return row;
 }
 
 /** 批量插入每日利润(有则更新) */
@@ -370,3 +407,104 @@ export function listShops() {
 
 /** 数据库路径(供调试) */
 export function getDbPath() { return DB_PATH; }
+
+export function closeDb() { if (_db) { _db.close(); _db = null; } }
+
+// ============ 店铺日报利润 ============
+
+export function findShopByName(huiceName) {
+  const db = getDb();
+  return db.prepare('SELECT * FROM shops WHERE huice_name = ?').get(huiceName);
+}
+
+export function upsertShopDailyProfit(record) {
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO shop_daily_profit (shop_id, date, sales_amount, promo_spend, platform_fee, labor_fee, net_profit, net_profit_rate, promo_fee_ratio, roi, metrics_json, raw_row_json)
+    VALUES (@shopId, @date, @salesAmount, @promoSpend, @platformFee, @laborFee, @netProfit, @netProfitRate, @promoFeeRatio, @roi, @metricsJson, @rawRowJson)
+    ON CONFLICT(shop_id, date) DO UPDATE SET
+      sales_amount = excluded.sales_amount,
+      promo_spend = excluded.promo_spend,
+      platform_fee = excluded.platform_fee,
+      labor_fee = excluded.labor_fee,
+      net_profit = excluded.net_profit,
+      net_profit_rate = excluded.net_profit_rate,
+      promo_fee_ratio = excluded.promo_fee_ratio,
+      roi = excluded.roi,
+      metrics_json = excluded.metrics_json,
+      raw_row_json = excluded.raw_row_json,
+      captured_at = datetime('now')
+  `).run({
+    shopId: record.shopId,
+    date: record.date,
+    salesAmount: record.salesAmount ?? null,
+    promoSpend: record.promoSpend ?? null,
+    platformFee: record.platformFee ?? null,
+    laborFee: record.laborFee ?? null,
+    netProfit: record.netProfit ?? null,
+    netProfitRate: record.netProfitRate ?? null,
+    promoFeeRatio: record.promoFeeRatio ?? null,
+    roi: record.roi ?? null,
+    metricsJson: JSON.stringify(record.metrics || {}),
+    rawRowJson: JSON.stringify(record.rawRow || {}),
+  });
+}
+
+export function getShopDailyProfitRange(shopId, startDate, endDate) {
+  const db = getDb();
+  return db.prepare(
+    'SELECT * FROM shop_daily_profit WHERE shop_id = ? AND date BETWEEN ? AND ? ORDER BY date'
+  ).all(shopId, startDate, endDate);
+}
+
+export function getShopDailyProfitRangeByMallId(pddMallId, startDate, endDate) {
+  const db = getDb();
+  const mapping = db.prepare('SELECT huice_shop_id FROM pdd_shop_mapping WHERE pdd_mall_id = ? AND status = ?').get(pddMallId, 'confirmed');
+  if (!mapping) return [];
+  return getShopDailyProfitRange(mapping.huice_shop_id, startDate, endDate);
+}
+
+// ============ 拼多多店铺映射 ============
+
+export function upsertPddShopMapping(record) {
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO pdd_shop_mapping (pdd_mall_id, pdd_shop_name, huice_shop_id, match_method, matched_product_count, status)
+    VALUES (@pddMallId, @pddShopName, @huiceShopId, @matchMethod, @matchedProductCount, @status)
+    ON CONFLICT(pdd_mall_id) DO UPDATE SET
+      pdd_shop_name = excluded.pdd_shop_name,
+      huice_shop_id = excluded.huice_shop_id,
+      match_method = excluded.match_method,
+      matched_product_count = excluded.matched_product_count,
+      status = excluded.status,
+      updated_at = datetime('now')
+  `).run({
+    pddMallId: record.pddMallId,
+    pddShopName: record.pddShopName || '',
+    huiceShopId: record.huiceShopId,
+    matchMethod: record.matchMethod || 'product_id_auto',
+    matchedProductCount: record.matchedProductCount || 0,
+    status: record.status || 'confirmed',
+  });
+}
+
+export function getPddShopMapping(pddMallId) {
+  const db = getDb();
+  return db.prepare('SELECT * FROM pdd_shop_mapping WHERE pdd_mall_id = ?').get(pddMallId);
+}
+
+/** 用商品 ID 反查慧经营店铺候选 */
+export function findShopCandidatesByProductIds(productIds) {
+  if (!productIds || productIds.length === 0) return [];
+  const db = getDb();
+  const placeholders = productIds.map(() => '?').join(',');
+  // product_profit.shop_id 可能为 null,用 shop_name 关联 shops.huice_name
+  return db.prepare(`
+    SELECT s.shop_id, s.huice_name AS shop_name, COUNT(DISTINCT p.product_id) AS matched_product_count
+    FROM product_profit p
+    JOIN shops s ON s.huice_name = p.shop_name
+    WHERE p.product_id IN (${placeholders})
+    GROUP BY s.shop_id, s.huice_name
+    ORDER BY matched_product_count DESC, s.huice_name ASC
+  `).all(...productIds);
+}

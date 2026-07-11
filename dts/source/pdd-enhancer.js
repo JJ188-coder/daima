@@ -794,7 +794,122 @@ async function getPromoDataByWindow(window) {
       }
     }
 
+    // === 店铺报表逐日利润面板 ===
+    tryRenderShopProfitPanel();
+
     return { vueFilled: vueResult.filled, vueMatched: vueResult.matched };
+  }
+
+  // ============ 店铺报表逐日利润 ============
+
+  function tryRenderShopProfitPanel() {
+    const dialog = document.querySelector('.el-dialog.dts-modal');
+    if (!dialog) return;
+    // 只在"店铺报表"弹窗里渲染
+    const title = (dialog.querySelector('.el-dialog__title, .el-dialog__header')?.innerText || dialog.innerText || '');
+    if (!title.includes('店铺报表')) return;
+
+    // 从标题提取当前拼多多店铺名: "店铺报表-昀诺零食专营店" -> "昀诺零食专营店"
+    const shopMatch = title.match(/店铺报表[-—]\s*(.+)/);
+    const pddShopName = shopMatch ? shopMatch[1].trim() : '';
+
+    // 读日期范围
+    const dateText = (dialog.innerText || '').match(/统计时间[：:]\s*(\d{4}-\d{2}-\d{2})\s*[~～\--至到]\s*(\d{4}-\d{2}-\d{2})/);
+    if (!dateText) return;
+    const start = dateText[1];
+    const end = dateText[2];
+
+    // 幂等: 面板已存在且日期范围没变就不重建
+    const existingPanel = dialog.querySelector('.dts-store-profit-panel');
+    if (existingPanel && existingPanel.dataset.dateRange === start + '~' + end) {
+      return; // 面板已渲染且日期没变,跳过
+    }
+
+    // 移除旧面板(日期变了才走到这里)
+    dialog.querySelectorAll('.dts-store-profit-panel').forEach(n => n.remove());
+
+    // 创建面板
+    const panel = document.createElement('div');
+    panel.className = 'dts-store-profit-panel';
+    panel.dataset.dateRange = start + '~' + end;
+    panel.style.cssText = 'margin:8px 0;padding:8px;border:1px solid #722ed1;border-radius:4px;font-size:13px;';
+
+    // 找插入点(表格 wrapper 前面)
+    const tableWrapper = dialog.querySelector('.table-wrapper');
+    if (tableWrapper) tableWrapper.parentElement.insertBefore(panel, tableWrapper);
+    else dialog.appendChild(panel);
+
+    panel.innerHTML = '<div style="color:#722ed1;font-weight:600;">🏪 店铺逐日利润</div><div style="color:#999;padding:4px 0;">加载中...</div>';
+
+    // 异步拉取数据
+    fetchShopProfitRange(start, end, pddShopName).then(data => {
+      renderShopProfitPanel(panel, data, start, end);
+    }).catch(err => {
+      panel.innerHTML = '<div style="color:#722ed1;font-weight:600;">🏪 店铺逐日利润</div><div style="color:#f5222d;padding:4px 0;">加载失败: ' + err.message + '</div>';
+    });
+  }
+
+  async function fetchShopProfitRange(start, end, pddShopName) {
+    // 传 pddShopName 让服务端匹配正确的慧经营店铺
+    const params = new URLSearchParams({ start, end });
+    if (pddShopName) params.set('pddShopName', pddShopName);
+
+    const resp = await fetch(`http://127.0.0.1:9911/shop-profit?${params}`, { signal: AbortSignal.timeout(5000) });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    return await resp.json();
+  }
+
+  function renderShopProfitPanel(panel, data, start, end) {
+    if (data.status === 'no_mapping') {
+      panel.innerHTML = '<div style="color:#722ed1;font-weight:600;">🏪 店铺逐日利润</div><div style="color:#999;padding:4px 0;">未匹配到慧经营店铺,请先采集店铺数据</div>';
+      return;
+    }
+    if (data.status === 'ambiguous') {
+      panel.innerHTML = '<div style="color:#722ed1;font-weight:600;">🏪 店铺逐日利润</div><div style="color:#faad14;padding:4px 0;">匹配到多个慧经营店铺,请确认映射</div>';
+      return;
+    }
+    if (!data.days || data.days.length === 0) {
+      panel.innerHTML = '<div style="color:#722ed1;font-weight:600;">🏪 店铺逐日利润</div><div style="color:#999;padding:4px 0;">无数据</div>';
+      return;
+    }
+
+    const fmtMoney = v => v == null ? '--' : '¥' + Number(v).toFixed(2);
+    const fmtPct = v => v == null ? '--' : (Number(v) * 100).toFixed(2) + '%';
+    const fmtRatio = v => v == null ? '--' : Number(v).toFixed(2);
+
+    let html = '<div style="color:#722ed1;font-weight:600;margin-bottom:4px;">🏪 店铺逐日利润 (' + (data.mapping?.huiceShopName || '') + ')</div>';
+    html += '<table style="width:100%;border-collapse:collapse;font-size:12px;">';
+    html += '<thead><tr style="background:#f9f0ff;">';
+    html += '<th style="padding:4px 8px;border:1px solid #e8e8e8;text-align:left;">日期</th>';
+    html += '<th style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">推广费用</th>';
+    html += '<th style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">ROI</th>';
+    html += '<th style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">保本ROI</th>';
+    html += '<th style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">费比</th>';
+    html += '<th style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">净利润率</th>';
+    html += '<th style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">净利润额</th>';
+    html += '</tr></thead><tbody>';
+
+    for (const day of data.days) {
+      const loss = day.isLoss;
+      const style = loss ? 'color:#f5222d;font-weight:600;' : '';
+      const missing = day.missing;
+      html += '<tr style="' + (missing ? 'color:#ccc;' : style) + '">';
+      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;">' + day.date + '</td>';
+      if (missing) {
+        html += '<td colspan="6" style="padding:4px 8px;border:1px solid #e8e8e8;text-align:center;">--</td>';
+      } else {
+        html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtMoney(day.promoSpend) + '</td>';
+        html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtRatio(day.roi) + '</td>';
+        html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtRatio(day.breakEvenRoi) + '</td>';
+        html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtPct(day.promoFeeRatio) + '</td>';
+        html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtPct(day.netProfitRate) + '</td>';
+        html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtMoney(day.netProfit) + '</td>';
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+
+    panel.innerHTML = html;
   }
 
   // ============ 慧经营利润数据：存储 & 读取 ============
