@@ -300,7 +300,7 @@ async function clickQuery(ws) {
   await sleep(5000);
 }
 
-/** 点导出图标 -> 选"否"(不分店铺) -> 点"确 定" -> 去下载中心 */
+/** 点导出图标 -> 选"否" -> 关通知 -> 点"确 定" -> 等通知 */
 async function clickExport(ws) {
   // 1. 点导出图标
   const exportResult = await cdpEval(ws, `(() => {
@@ -311,16 +311,14 @@ async function clickExport(ws) {
   console.log(`  📤 导出图标: ${exportResult}`);
   await sleep(2000);
 
-  // 2. 选"否"(分店铺导出选否) - 点 radio 的 input
+  // 2. 选"否"
   const noResult = await cdpEval(ws, `(() => {
     const dialogs = [...document.querySelectorAll('.el-dialog')].filter(d => d.offsetParent !== null);
     const target = dialogs.find(d => d.innerText.includes('分店铺'));
     if (!target) return 'no dialog';
-    // 找"否"的 radio input
     const labels = [...target.querySelectorAll('label.el-radio-button')];
     const noLabel = labels.find(l => (l.innerText || '').trim() === '否');
     if (!noLabel) return 'no 否 label';
-    // 如果还没选中,点 input
     if (!noLabel.classList.contains('is-active')) {
       const input = noLabel.querySelector('input[type=radio]');
       if (input) { input.click(); return 'clicked input'; }
@@ -331,59 +329,66 @@ async function clickExport(ws) {
   console.log(`  📤 分店铺选否: ${noResult}`);
   await sleep(500);
 
-  // 3. 点"确 定"(用 DOM click + CDP 鼠标点击双保险)
-  const confirmResult = await cdpEval(ws, `(() => {
-    const btns = [...document.querySelectorAll('button')].filter(b => b.offsetParent !== null);
-    const confirmBtn = btns.find(b => (b.innerText||'').trim().replace(/\\s/g, '') === '确定');
-    if (!confirmBtn) return 'not found';
-    // 点 button
-    confirmBtn.click();
-    // 也点 span
-    const span = confirmBtn.querySelector('span');
-    if (span) span.click();
-    return 'clicked';
-  })()`);
-  console.log(`  📤 确 定: ${confirmResult}`);
+  // 3. 先关残留通知(通知会遮住确定按钮)
+  await closePopups(ws);
   await sleep(1000);
 
-  // 4. 用 CDP 真实鼠标点击(双保险)
+  // 4. 找确定按钮坐标,用 CDP 鼠标点击(最可靠)
   const coords = await cdpEval(ws, `(() => {
-    const btns = [...document.querySelectorAll('button')].filter(b => b.offsetParent !== null);
+    const dialogs = [...document.querySelectorAll('.el-dialog')].filter(d => d.offsetParent !== null);
+    const target = dialogs.find(d => d.innerText.includes('分店铺') || d.innerText.includes('导出'));
+    if (!target) return null;
+    const btns = [...target.querySelectorAll('button')];
     const confirmBtn = btns.find(b => (b.innerText||'').trim().replace(/\\s/g, '') === '确定');
     if (!confirmBtn) return null;
     const rect = confirmBtn.getBoundingClientRect();
     return JSON.stringify({ x: Math.round(rect.left + rect.width/2), y: Math.round(rect.top + rect.height/2) });
   })()`);
+
   if (coords) {
     const { x, y } = JSON.parse(coords);
+    console.log(`  📤 确 定: CDP点击 (${x}, ${y})`);
     await cdpCall(ws, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
-    await sleep(200);
+    await sleep(300);
     await cdpCall(ws, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
     await sleep(100);
     await cdpCall(ws, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-    console.log(`  📤 CDP鼠标点击: (${x}, ${y})`);
+  } else {
+    console.log(`  📤 确 定: 坐标未找到,用 DOM click`);
+    await cdpEval(ws, `(() => {
+      const btns = [...document.querySelectorAll('button')].filter(b => b.offsetParent !== null);
+      const confirmBtn = btns.find(b => (b.innerText||'').trim().replace(/\\s/g, '') === '确定');
+      if (confirmBtn) { confirmBtn.click(); const span = confirmBtn.querySelector('span'); if (span) span.click(); return 'clicked'; }
+      return 'not found';
+    })()`);
   }
 
-  // 5. 等后台生成(最多 40 秒)
-  for (let i = 0; i < 20; i++) {
+  // 5. 轮询关通知 + 等"我知道了"(最多 60 秒)
+  let gotNotification = false;
+  for (let i = 0; i < 30; i++) {
     await sleep(2000);
+    await closePopups(ws);  // 每轮先关残留通知
     const knowResult = await cdpEval(ws, `(() => {
       const btn = [...document.querySelectorAll('button')].find(b => {
         const t = (b.innerText || '').trim();
-        return t.includes('我知道了') || t.includes('300S');
+        return t.includes('我知道了') || t.includes('300S') || t.includes('导出成功');
       });
       if (btn && btn.offsetParent !== null) { btn.click(); return 'clicked'; }
       return 'not found';
     })()`);
     if (knowResult === 'clicked') {
       console.log(`  📤 我知道了: 已关闭`);
+      gotNotification = true;
       break;
     }
   }
-  
-  // 不管弹窗关没关,等 3 秒去下载中心
-  await sleep(3000);
+
+  if (!gotNotification) {
+    console.log(`  📤 未等到通知,继续`);
+  }
+  await sleep(2000);
 }
+
 
 /** 去下载中心,等新任务出现再下载 */
 async function downloadFromCenter(ws, targetDate, exportRequestedAt) {
