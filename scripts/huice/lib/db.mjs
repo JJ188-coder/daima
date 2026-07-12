@@ -523,7 +523,7 @@ export function findShopCandidatesByProductIds(productIds) {
     JOIN shops s ON s.huice_name = p.shop_name
     WHERE p.product_id IN (${placeholders})
     GROUP BY s.shop_id, s.huice_name
-    HAVING matched_product_count >= 2
+    HAVING matched_product_count >= 1
     ORDER BY matched_product_count DESC, s.huice_name ASC
   `).all(...productIds);
 }
