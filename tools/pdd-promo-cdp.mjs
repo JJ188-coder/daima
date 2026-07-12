@@ -63,7 +63,7 @@ async function cdpEval(ws, expression) {
 async function setSingleDate(ws, targetDate) {
   const [year, month, day] = targetDate.split('-').map(Number);
   const targetDateSlash = `${year}/${String(month).padStart(2,'0')}/${String(day).padStart(2,'0')}`;
-  const targetYearMonth = `${year}年${month}月`;
+  const targetMonth = `${month}月`;  // 只匹配月,不匹配年(面板年份显示可能不对)
 
   // 0. 关闭旧面板
   await cdpEval(ws, `document.body.click()`);
@@ -77,30 +77,46 @@ async function setSingleDate(ws, targetDate) {
   })()`);
   await sleep(1500);
 
-  // 2. 翻月到目标月(面板文字含"2026年7月")
-  for (let attempt = 0; attempt < 12; attempt++) {
-    const found = await cdpEval(ws, `(() => {
+  // 2. 先翻年到目标年,再翻月到目标月
+  const targetYearStr = `${year}年`;
+  for (let attempt = 0; attempt < 36; attempt++) {
+    const check = await cdpEval(ws, `(() => {
       const dropdown = document.querySelector('.anq-picker-dropdown');
       if (!dropdown) return 'no dropdown';
-      return (dropdown.innerText || '').includes('${targetYearMonth}') ? 'found' : 'not found';
+      const yearBtns = [...dropdown.querySelectorAll('.anq-picker-year-btn')];
+      const years = yearBtns.map(b => b.innerText.trim());
+      const monthBtns = [...dropdown.querySelectorAll('.anq-picker-month-btn')];
+      const months = monthBtns.map(b => b.innerText.trim());
+      const hasYear = years.includes('${targetYearStr}');
+      const hasMonth = months.includes('${targetMonth}');
+      return JSON.stringify({ hasYear, hasMonth, years, months });
     })()`);
-    if (found === 'found') break;
+    const info = JSON.parse(check || '{}');
+    if (info.hasYear && info.hasMonth) break;
 
-    // 翻月: 找箭头按钮
-    await cdpEval(ws, `(() => {
-      const dropdown = document.querySelector('.anq-picker-dropdown');
-      if (!dropdown) return 'no dropdown';
-      // 找左箭头(上个月)
-      const arrows = [...dropdown.querySelectorAll('[class*=arrow], [class*=prev], [class*=next], button')];
-      const leftArrow = arrows.find(a => a.offsetParent !== null && /left|prev|arrow-left/i.test(a.className || ''));
-      if (leftArrow) { leftArrow.click(); return 'prev'; }
-      // 也试 class 含 icon 的
-      const icons = [...dropdown.querySelectorAll('[class*=icon-arrow-left], [class*=left]')];
-      const icon = icons.find(a => a.offsetParent !== null);
-      if (icon) { icon.click(); return 'prev icon'; }
-      return 'no arrow';
-    })()`);
-    await sleep(600);
+    if (!info.hasYear) {
+      // 翻年: 点下一年按钮
+      await cdpEval(ws, `(() => {
+        const dropdown = document.querySelector('.anq-picker-dropdown');
+        if (!dropdown) return 'no dropdown';
+        const btns = [...dropdown.querySelectorAll('.anq-picker-header-super-next-btn')];
+        const visible = btns.find(b => b.offsetParent !== null && b.style.visibility !== 'hidden');
+        if (visible) { visible.click(); return 'next year'; }
+        return 'no next year btn';
+      })()`);
+      await sleep(300);
+    } else {
+      // 年对了但月不对,翻月
+      await cdpEval(ws, `(() => {
+        const dropdown = document.querySelector('.anq-picker-dropdown');
+        if (!dropdown) return 'no dropdown';
+        const btns = [...dropdown.querySelectorAll('.anq-picker-header-prev-btn, .anq-picker-header-next-btn')];
+        const visible = btns.find(b => b.offsetParent !== null && b.style.visibility !== 'hidden');
+        if (visible) { visible.click(); return 'month'; }
+        return 'no month btn';
+      })()`);
+      await sleep(300);
+    }
   }
 
   // 3. 点目标日期两次
@@ -108,10 +124,22 @@ async function setSingleDate(ws, targetDate) {
     await cdpEval(ws, `(() => {
       const dropdown = document.querySelector('.anq-picker-dropdown');
       if (!dropdown) return 'no dropdown';
-      const tds = [...dropdown.querySelectorAll('td')];
-      // 找目标日: 文字匹配,不是 disabled/prev/next
-      let dayCell = tds.find(td => td.textContent.trim() === '${day}' && !td.classList.contains('disabled') && !td.classList.contains('prev') && !td.classList.contains('next'));
-      if (!dayCell) dayCell = tds.find(td => td.textContent.trim() === '${day}');
+      // 找包含目标月的面板
+      const panels = [...dropdown.querySelectorAll('.anq-picker-panel')];
+      const targetPanel = panels.find(p => (p.innerText || '').includes('${targetMonth}'));
+      const searchIn = targetPanel || dropdown;
+      const tds = [...searchIn.querySelectorAll('td')];
+      // 找目标日: 排除 disabled(anq-picker-cell-disabled) 和 prev/next 月的日期
+      let dayCell = tds.find(td =>
+        td.textContent.trim() === '${day}' &&
+        !td.className.includes('disabled') &&
+        !td.className.includes('prev') &&
+        !td.className.includes('next')
+      );
+      if (!dayCell) {
+        // fallback: 找非 disabled 的
+        dayCell = tds.find(td => td.textContent.trim() === '${day}' && !td.className.includes('disabled'));
+      }
       if (!dayCell) return 'no day ${day}';
       dayCell.click();
       return 'clicked ${day}';
