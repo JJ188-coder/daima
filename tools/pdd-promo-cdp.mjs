@@ -77,46 +77,27 @@ async function setSingleDate(ws, targetDate) {
   })()`);
   await sleep(1500);
 
-  // 2. 先翻年到目标年,再翻月到目标月
-  const targetYearStr = `${year}年`;
-  for (let attempt = 0; attempt < 36; attempt++) {
+  // 2. 翻月到目标月(面板默认显示当前月,翻上个月按钮即可)
+  for (let attempt = 0; attempt < 12; attempt++) {
     const check = await cdpEval(ws, `(() => {
       const dropdown = document.querySelector('.anq-picker-dropdown');
       if (!dropdown) return 'no dropdown';
-      const yearBtns = [...dropdown.querySelectorAll('.anq-picker-year-btn')];
-      const years = yearBtns.map(b => b.innerText.trim());
       const monthBtns = [...dropdown.querySelectorAll('.anq-picker-month-btn')];
       const months = monthBtns.map(b => b.innerText.trim());
-      const hasYear = years.includes('${targetYearStr}');
-      const hasMonth = months.includes('${targetMonth}');
-      return JSON.stringify({ hasYear, hasMonth, years, months });
+      return months.includes('${targetMonth}') ? 'found' : 'not found,' + months.join(',');
     })()`);
-    const info = JSON.parse(check || '{}');
-    if (info.hasYear && info.hasMonth) break;
+    if (check === 'found') break;
 
-    if (!info.hasYear) {
-      // 翻年: 点下一年按钮
-      await cdpEval(ws, `(() => {
-        const dropdown = document.querySelector('.anq-picker-dropdown');
-        if (!dropdown) return 'no dropdown';
-        const btns = [...dropdown.querySelectorAll('.anq-picker-header-super-next-btn')];
-        const visible = btns.find(b => b.offsetParent !== null && b.style.visibility !== 'hidden');
-        if (visible) { visible.click(); return 'next year'; }
-        return 'no next year btn';
-      })()`);
-      await sleep(300);
-    } else {
-      // 年对了但月不对,翻月
-      await cdpEval(ws, `(() => {
-        const dropdown = document.querySelector('.anq-picker-dropdown');
-        if (!dropdown) return 'no dropdown';
-        const btns = [...dropdown.querySelectorAll('.anq-picker-header-prev-btn, .anq-picker-header-next-btn')];
-        const visible = btns.find(b => b.offsetParent !== null && b.style.visibility !== 'hidden');
-        if (visible) { visible.click(); return 'month'; }
-        return 'no month btn';
-      })()`);
-      await sleep(300);
-    }
+    // 翻月: 点上个月按钮
+    await cdpEval(ws, `(() => {
+      const dropdown = document.querySelector('.anq-picker-dropdown');
+      if (!dropdown) return 'no dropdown';
+      const btns = [...dropdown.querySelectorAll('.anq-picker-header-prev-btn')];
+      const visible = btns.find(b => b.offsetParent !== null && b.style.visibility !== 'hidden');
+      if (visible) { visible.click(); return 'prev'; }
+      return 'no prev btn';
+    })()`);
+    await sleep(600);
   }
 
   // 3. 点目标日期两次
