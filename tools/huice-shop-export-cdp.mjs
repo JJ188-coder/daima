@@ -88,12 +88,29 @@ async function cdpEval(ws, expression) {
   return res.result?.result?.value;
 }
 
-/** 关闭弹窗（"我知道了"等通知按钮,不点遮罩层避免触发页面跳转） */
+/** 关闭弹窗和通知（"我知道了"在 el-notification 里不是 button,需要特殊处理） */
 async function closePopups(ws) {
   await cdpEval(ws, `(() => {
+    // 1. 关 button 类型的通知
     document.querySelectorAll('button, .el-button').forEach(el => {
       const t = (el.innerText || '').trim().replace(/\\s/g, '');
       if (['我知道了', '300S后关闭', '确定', '关闭', '取消'].includes(t) && el.offsetParent !== null) el.click();
+    });
+    // 2. 关 el-notification 里的"我知道了"(文字不是 button,在 .el-notification__content 里)
+    document.querySelectorAll('.el-notification').forEach(n => {
+      if (n.offsetParent === null) return;
+      const text = n.innerText || '';
+      if (text.includes('我知道了')) {
+        // 找包含"我知道了"的可点击元素
+        const clickTarget = [...n.querySelectorAll('*')].find(el => 
+          (el.innerText || '').trim() === '我知道了' && el.offsetParent !== null
+        );
+        if (clickTarget) clickTarget.click();
+      }
+    });
+    // 3. 直接移除 el-notification DOM(兜底)
+    document.querySelectorAll('.el-notification').forEach(n => {
+      if (n.offsetParent !== null) n.style.display = 'none';
     });
     return 'ok';
   })()`);
