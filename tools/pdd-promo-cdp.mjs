@@ -304,7 +304,7 @@ async function main() {
     // 4. 读推广费
     const promo = await readPromoData(ws);
     if (!hasCompletePromoMetrics(promo)) {
-      console.log(`  ⚠️ 读不到完整推广数据（推广费或 ROI 缺失）`);
+      console.log(`  ⚠️ 读不到完整推广数据（推广费缺失，或有花费但 ROI 缺失）`);
       markCollectorFailure(result, targetDate, 'promotion metrics incomplete');
       continue;
     }

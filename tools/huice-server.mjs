@@ -28,8 +28,8 @@ import {
   findShopCandidatesByProductIds,
 } from '../scripts/huice/lib/db.mjs';
 import { aggregateProfitRecords } from '../scripts/huice/lib/profit.mjs';
-import { buildStoreReportDay, fillDateRange } from '../scripts/huice/lib/shop-profit.mjs';
-import { buildCorsHeaders } from '../scripts/huice/lib/http-security.mjs';
+import { buildStoreReportDay, fillDateRange, summarizeStoreReportDays } from '../scripts/huice/lib/shop-profit.mjs';
+import { buildCorsHeaders, isAllowedMutationRequest } from '../scripts/huice/lib/http-security.mjs';
 import { decideShopMapping } from '../scripts/huice/lib/shop-mapping.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -195,42 +195,20 @@ async function handler(req, res) {
       const filledDays = fillDateRange({ start, end, rowsByDate: shopByDate });
 
       const days = filledDays.map(day => {
-        if (day.missing) {
-          return { date: day.date, missing: true };
-        }
-        // 慧经营数据(慧经营导出的净利润里推广费为0,需要减去拼多多推广费)
-        const salesAmount = day.sales_amount;
-        const huiceNetProfit = day.net_profit;
-        const huiceNetProfitRate = day.net_profit_rate;
-        // 拼多多推广数据(从独立表读)
+        if (day.missing) return { date: day.date, missing: true };
+
         const promo = promoByDate.get(day.date);
-        const promoSpend = promo?.promo_spend ?? null;
-        const roi = promo?.roi ?? null;
-
-        // 净利润 = 慧经营净利润 - 推广费
-        const netProfit = (huiceNetProfit != null && promoSpend != null)
-          ? huiceNetProfit - promoSpend
-          : huiceNetProfit;
-        // 净利率 = 修正后净利润 / 销售额
-        const netProfitRate = (netProfit != null && salesAmount > 0)
-          ? netProfit / salesAmount
-          : huiceNetProfitRate;
-        // 用拼多多推广费算费比
-        const promoFeeRatio = (promoSpend != null && salesAmount > 0) ? promoSpend / salesAmount : null;
-        const breakEvenRoi = netProfitRate && netProfitRate > 0 ? 1 / netProfitRate : null;
-
-        return {
+        return buildStoreReportDay({
           date: day.date,
-          salesAmount,
-          promoSpend,
-          roi,
-          breakEvenRoi,
-          promoFeeRatio,
-          netProfitRate,
-          netProfit,
-          isLoss: netProfit != null && netProfit < 0,
-        };
+          shop: {
+            salesAmount: day.sales_amount,
+            netProfit: day.net_profit,
+            promoSpend: promo?.promo_spend ?? null,
+            roi: promo?.roi ?? null,
+          },
+        });
       });
+      const summary = summarizeStoreReportDays(days);
 
       sendJson(req, res, {
         status: 'ok',
@@ -240,15 +218,23 @@ async function handler(req, res) {
           huiceShopName: huiceShop?.huice_name || '',
         },
         days,
+        summary,
       });
       return;
     }
 
     // POST /shop-mapping/candidates
     if (path === '/shop-mapping/candidates' && req.method === 'POST') {
-      const body = await new Promise(resolve => {
+      if (!isAllowedMutationRequest(req.headers.origin, req.headers['content-type'])) {
+        sendJson(req, res, { error: 'forbidden origin or content type' }, 403);
+        return;
+      }
+      const body = await new Promise((resolve, reject) => {
         let data = '';
-        req.on('data', chunk => data += chunk);
+        req.on('data', chunk => {
+          data += chunk;
+          if (data.length > 100_000) reject(new Error('request body too large'));
+        });
         req.on('end', () => resolve(JSON.parse(data || '{}')));
       });
 
@@ -276,9 +262,16 @@ async function handler(req, res) {
 
     // POST /shop-mapping/confirm
     if (path === '/shop-mapping/confirm' && req.method === 'POST') {
-      const body = await new Promise(resolve => {
+      if (!isAllowedMutationRequest(req.headers.origin, req.headers['content-type'])) {
+        sendJson(req, res, { error: 'forbidden origin or content type' }, 403);
+        return;
+      }
+      const body = await new Promise((resolve, reject) => {
         let data = '';
-        req.on('data', chunk => data += chunk);
+        req.on('data', chunk => {
+          data += chunk;
+          if (data.length > 100_000) reject(new Error('request body too large'));
+        });
         req.on('end', () => resolve(JSON.parse(data || '{}')));
       });
 

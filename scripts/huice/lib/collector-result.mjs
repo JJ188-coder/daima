@@ -14,5 +14,6 @@ export function collectorExitCode(result) {
 
 export function hasCompletePromoMetrics(promo) {
   const isMetric = value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
-  return isMetric(promo?.promoSpend) && isMetric(promo?.roi);
+  if (!isMetric(promo?.promoSpend)) return false;
+  return Number(promo.promoSpend) === 0 || isMetric(promo?.roi);
 }

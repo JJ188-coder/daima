@@ -696,6 +696,11 @@ async function getPromoDataByWindow(window) {
         }
       }
     }
+    // 店铺利润面板和首次映射只依赖本地慧经营数据,不应被商品推广缓存阻断
+    await prepareShopMappingProductIds(dialogWindow);
+    setTimeout(() => tryRenderShopProfitPanel(), 500);
+    setTimeout(() => tryRenderShopProfitPanel(), 3000);
+
     let promoRecords = await getPromoDataByWindow(dialogWindow);
     // 精确匹配返回 null 或无数据时，触发按需拉取并等待数据
     if (!promoRecords?.length && dialogWindow) {
@@ -797,17 +802,24 @@ async function getPromoDataByWindow(window) {
       }
     }
 
-    // === 店铺报表逐日利润面板 ===
-    // 延迟渲染,等 collectMatchedReportRecords 完成后再触发(它可能还在 async 执行中)
-    setTimeout(() => tryRenderShopProfitPanel(), 500);
-    setTimeout(() => tryRenderShopProfitPanel(), 3000);
-
     return { vueFilled: vueResult.filled, vueMatched: vueResult.matched };
   }
 
   // ============ 店铺报表逐日利润 ============
 
   let latestMatchedHuiceProductIds = [];
+
+  async function prepareShopMappingProductIds(dialogWindow) {
+    if (!dialogWindow) return;
+    const dialog = document.querySelector('.el-dialog.dts-modal');
+    if (!dialog || !(dialog.innerText || '').includes('店铺报表')) return;
+    const [startDate, endDate = startDate] = dialogWindow.split('~');
+    const huiceRecords = await getHuiceDataByDateRange(startDate, endDate);
+    const huiceMap = {};
+    huiceRecords.forEach(record => { if (record.productId) huiceMap[record.productId] = record; });
+    const page = getDialogPageData(dialog, huiceMap);
+    latestMatchedHuiceProductIds = page ? Array.from(page.matchedRecords.keys()) : [];
+  }
 
   function tryRenderShopProfitPanel() {
     const dialog = document.querySelector('.el-dialog.dts-modal');
@@ -938,20 +950,11 @@ async function getPromoDataByWindow(window) {
     let html = '<div style="color:#722ed1;font-weight:600;margin-bottom:4px;">🏪 店铺逐日利润 (' + escapeHtml(data.mapping?.huiceShopName || '') + ')</div>';
 
     // === 汇总行 ===
-    const validDays = data.days.filter(d => !d.missing);
-    if (validDays.length > 0) {
-      const sumSales = validDays.reduce((s, d) => s + (Number(d.salesAmount) || 0), 0);
-      const sumNetProfit = validDays.reduce((s, d) => s + (Number(d.netProfit) || 0), 0);
-      const sumPromoSpend = validDays.reduce((s, d) => s + (Number(d.promoSpend) || 0), 0);
-      const summaryNetProfitRate = sumSales > 0 ? sumNetProfit / sumSales : null;
-      const summaryPromoFeeRatio = sumSales > 0 && sumPromoSpend > 0 ? sumPromoSpend / sumSales : null;
-      const summaryRoi = sumPromoSpend > 0 ? sumSales / sumPromoSpend : null;
-      const summaryBreakEvenRoi = summaryNetProfitRate > 0 ? 1 / summaryNetProfitRate : null;
-      const summaryIsLoss = sumNetProfit < 0;
-
+    const summary = data.summary;
+    if (summary) {
       html += '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:6px;">';
       html += '<thead><tr style="background:#722ed1;color:#fff;">';
-      html += '<th style="padding:4px 8px;border:1px solid #722ed1;text-align:left;">汇总(' + validDays.length + '天)</th>';
+      html += '<th style="padding:4px 8px;border:1px solid #722ed1;text-align:left;">汇总(' + summary.validDayCount + '天)</th>';
       html += '<th style="padding:4px 8px;border:1px solid #722ed1;text-align:right;">销售额</th>';
       html += '<th style="padding:4px 8px;border:1px solid #722ed1;text-align:right;">推广费用</th>';
       html += '<th style="padding:4px 8px;border:1px solid #722ed1;text-align:right;">ROI</th>';
@@ -960,18 +963,22 @@ async function getPromoDataByWindow(window) {
       html += '<th style="padding:4px 8px;border:1px solid #722ed1;text-align:right;">净利率</th>';
       html += '<th style="padding:4px 8px;border:1px solid #722ed1;text-align:right;">净利润额</th>';
       html += '</tr></thead><tbody>';
-      const summaryStyle = summaryIsLoss ? 'color:#f5222d;font-weight:700;' : 'color:#333;font-weight:700;';
-      html += '<tr style="' + summaryStyle + ';">';
+      const summaryStyle = summary.isLoss ? 'color:#f5222d;font-weight:700;' : 'color:#333;font-weight:700;';
+      html += '<tr style="' + summaryStyle + '">';
       html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;">合计</td>';
-      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtMoney(sumSales) + '</td>';
-      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtMoney(sumPromoSpend) + '</td>';
-      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtRatio(summaryRoi) + '</td>';
-      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtRatio(summaryBreakEvenRoi) + '</td>';
-      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtPct(summaryPromoFeeRatio) + '</td>';
-      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtPct(summaryNetProfitRate) + '</td>';
-      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtMoney(sumNetProfit) + '</td>';
+      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtMoney(summary.salesAmount) + '</td>';
+      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtMoney(summary.promoSpend) + '</td>';
+      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtRatio(summary.roi) + '</td>';
+      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtRatio(summary.breakEvenRoi) + '</td>';
+      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtPct(summary.promoFeeRatio) + '</td>';
+      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtPct(summary.netProfitRate) + '</td>';
+      html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtMoney(summary.netProfit) + '</td>';
       html += '</tr>';
       html += '</tbody></table>';
+      if (!summary.promoComplete) {
+        html += '<div style="color:#d48806;font-size:12px;margin:-2px 0 6px;">⚠️ 推广数据缺失 ' + summary.promoMissingDays + ' 天，推广费、ROI、费比和扣推广后利润汇总暂不计算</div>';
+      }
+
     }
 
     // === 逐日明细表 ===

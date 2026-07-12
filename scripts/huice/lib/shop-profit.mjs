@@ -44,30 +44,83 @@ export function toPercent(value) {
 
 export function buildStoreReportDay({ date, shop }) {
   const salesAmount = toNumber(shop?.salesAmount);
-  const huiceNetProfit = toNumber(shop?.netProfit);
+  const netProfitBeforePromo = toNumber(shop?.netProfit);
   const promoSpend = toNumber(shop?.promoSpend);
-  const exportedPromoFeeRatio = toNumber(shop?.promoFeeRatio);
   const exportedRoi = toNumber(shop?.roi);
+  const promoDataPresent = promoSpend != null;
+  const roi = exportedRoi ?? ((salesAmount != null && promoSpend > 0) ? salesAmount / promoSpend : null);
 
-  // 净利润 = 慧经营净利润 - 推广费(慧经营导出的净利润里推广费为0)
-  const netProfit = (huiceNetProfit != null && promoSpend != null)
-    ? huiceNetProfit - promoSpend
-    : huiceNetProfit;
-  // 净利率 = 修正后净利润 / 销售额
+  // 慧经营导出的推广费为0,净利润需要再减去拼多多推广费
+  const netProfit = (netProfitBeforePromo != null && promoDataPresent)
+    ? netProfitBeforePromo - promoSpend
+    : null;
   const netProfitRate = (netProfit != null && salesAmount > 0)
     ? netProfit / salesAmount
     : null;
-  const promoFeeRatio =
-    exportedPromoFeeRatio ?? (salesAmount && promoSpend != null ? promoSpend / salesAmount : null);
-  const roi = exportedRoi ?? (promoSpend ? salesAmount / promoSpend : null);
+  const promoFeeRatio = (promoDataPresent && salesAmount > 0)
+    ? promoSpend / salesAmount
+    : null;
+  const breakEvenRoi = (salesAmount > 0 && netProfitBeforePromo > 0)
+    ? salesAmount / netProfitBeforePromo
+    : null;
 
   return {
     date,
     salesAmount,
     promoSpend,
-    roi,
-    breakEvenRoi: netProfitRate && netProfitRate > 0 ? 1 / netProfitRate : null,
+    promoDataPresent,
+    roi: promoSpend === 0 ? null : roi,
+    breakEvenRoi,
     promoFeeRatio,
+    netProfitBeforePromo,
+    netProfitRate,
+    netProfit,
+    isLoss: netProfit != null && netProfit < 0,
+  };
+}
+
+export function summarizeStoreReportDays(days) {
+  const validDays = (days || []).filter(day => !day?.missing);
+  if (validDays.length === 0) return null;
+
+  const sumKnown = (field) => {
+    const values = validDays.map(day => toNumber(day?.[field]));
+    return values.every(value => value != null)
+      ? values.reduce((sum, value) => sum + value, 0)
+      : null;
+  };
+
+  const salesAmount = sumKnown('salesAmount');
+  const netProfitBeforePromo = sumKnown('netProfitBeforePromo');
+  const promoKnownDays = validDays.filter(day => day?.promoDataPresent === true).length;
+  const promoMissingDays = validDays.length - promoKnownDays;
+  const promoComplete = promoMissingDays === 0;
+  const promoSpend = promoComplete ? sumKnown('promoSpend') : null;
+  const netProfit = promoComplete ? sumKnown('netProfit') : null;
+  const promoFeeRatio = (promoComplete && salesAmount > 0 && promoSpend != null)
+    ? promoSpend / salesAmount
+    : null;
+  const roi = (promoComplete && promoSpend > 0 && salesAmount != null)
+    ? salesAmount / promoSpend
+    : null;
+  const netProfitRate = (netProfit != null && salesAmount > 0)
+    ? netProfit / salesAmount
+    : null;
+  const breakEvenRoi = (salesAmount > 0 && netProfitBeforePromo > 0)
+    ? salesAmount / netProfitBeforePromo
+    : null;
+
+  return {
+    validDayCount: validDays.length,
+    salesAmount,
+    promoSpend,
+    promoKnownDays,
+    promoMissingDays,
+    promoComplete,
+    roi,
+    breakEvenRoi,
+    promoFeeRatio,
+    netProfitBeforePromo,
     netProfitRate,
     netProfit,
     isLoss: netProfit != null && netProfit < 0,
