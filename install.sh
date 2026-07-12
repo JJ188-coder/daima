@@ -128,7 +128,161 @@ echo ""
 # === 5. 设定定时任务 ===
 echo -e "${YELLOW}[5/6] 配置定时任务 (launchd)...${NC}"
 LAUNCH_DIR="$HOME/Library/LaunchAgents"
-mkdir -p "$LAUNCH_DIR"
+LOCAL_BIN="$HOME/.local/bin"
+mkdir -p "$LAUNCH_DIR" "$LOCAL_BIN"
+
+# Node 绝对路径 (nvm 安装的 node 不在 launchd 默认 PATH 里)
+NODE_BIN="$(command -v node)"
+if [ -z "$NODE_BIN" ]; then
+  # nvm fallback
+  NODE_BIN="$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node/" 2>/dev/null | tail -1)/bin/node"
+fi
+if [ ! -f "$NODE_BIN" ]; then
+  echo -e "${RED}❌ 找不到 node 可执行文件${NC}"
+  exit 1
+fi
+echo -e "  ${CYAN}node 路径: $NODE_BIN${NC}"
+
+# --- 创建 wrapper 脚本 (放 ~/.local/bin 避开 macOS TCC 对 ~/Documents 的保护) ---
+
+# cdp-chrome wrapper
+cat > "$LOCAL_BIN/daima-cdp-chrome.sh" << EOF
+#!/bin/bash
+PROJECT_DIR="$SCRIPT_DIR"
+DTS_DIR="\$PROJECT_DIR/dts"
+
+if curl -s --max-time 2 http://127.0.0.1:9222/json/version > /dev/null 2>&1; then
+  echo "[cdp-chrome] 9222 CDP 已在线,跳过"
+  exit 0
+fi
+
+rm -f "\$HOME/.chrome-cdp-profile/SingletonLock" "\$HOME/.chrome-cdp-profile/SingletonSocket" 2>/dev/null
+
+nohup "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \\
+  --user-data-dir="\$HOME/.chrome-cdp-profile" \\
+  --remote-debugging-port=9222 \\
+  --remote-debugging-address=127.0.0.1 \\
+  --enable-extensions \\
+  --load-extension="\$DTS_DIR" \\
+  --no-first-run \\
+  --no-default-browser-check \\
+  --disable-features=TranslateUI \\
+  > /tmp/chrome-cdp.log 2>&1 &
+
+echo "[cdp-chrome] Chrome PID: \$!"
+
+for i in \$(seq 1 15); do
+  sleep 2
+  if curl -s --max-time 2 http://127.0.0.1:9222/json/version > /dev/null 2>&1; then
+    echo "[cdp-chrome] ✅ 9222 已上线"
+    exit 0
+  fi
+done
+
+echo "[cdp-chrome] ❌ 9222 启动超时"
+exit 1
+EOF
+chmod +x "$LOCAL_BIN/daima-cdp-chrome.sh"
+
+# huice-server wrapper
+cat > "$LOCAL_BIN/daima-huice-server.sh" << EOF
+#!/bin/bash
+NODE_BIN="$NODE_BIN"
+PROJECT_DIR="$SCRIPT_DIR"
+
+if lsof -nP -iTCP:9911 -sTCP:LISTEN > /dev/null 2>&1; then
+  echo "[huice-server] 9911 端口已在线,跳过"
+  exit 0
+fi
+
+nohup "\$NODE_BIN" "\$PROJECT_DIR/tools/huice-server.mjs" \\
+  > /tmp/huice-server.log 2>&1 &
+
+echo "[huice-server] PID: \$!"
+
+for i in \$(seq 1 5); do
+  sleep 1
+  if lsof -nP -iTCP:9911 -sTCP:LISTEN > /dev/null 2>&1; then
+    echo "[huice-server] ✅ 9911 已上线"
+    exit 0
+  fi
+done
+
+echo "[huice-server] ❌ 9911 启动超时"
+exit 1
+EOF
+chmod +x "$LOCAL_BIN/daima-huice-server.sh"
+
+# huice-daily wrapper (逻辑内联,用 node 替代 curl+python3,去掉 set -e)
+cat > "$LOCAL_BIN/daima-huice-daily.sh" << 'DAILY_EOF'
+#!/bin/bash
+NODE_BIN="__NODE_BIN__"
+PROJECT_DIR="__PROJECT_DIR__"
+
+LOG_PREFIX="[huice-daily $(date '+%Y-%m-%d %H:%M:%S')]"
+
+echo "$LOG_PREFIX === 每日慧经营数据同步开始 ==="
+
+cd "$PROJECT_DIR" || { echo "$LOG_PREFIX ❌ cd 失败"; exit 1; }
+
+# 用 node 检查 CDP + 慧经营标签页 (避开 curl/python3 在 launchd 下的差异)
+HJY_CHECK=$("$NODE_BIN" -e '
+const http = require("http");
+const req = http.get("http://127.0.0.1:9222/json/list", {timeout: 5000}, (res) => {
+  let data = "";
+  res.on("data", d => data += d);
+  res.on("end", () => {
+    try {
+      const tabs = JSON.parse(data);
+      const found = tabs.some(t => t.type === "page" && (t.url||"").includes("hjy.huice.com"));
+      console.log(found ? "ok" : "no_hjy");
+    } catch(e) { console.log("parse_error"); }
+  });
+});
+req.on("error", () => console.log("no_cdp"));
+req.on("timeout", () => { req.destroy(); console.log("timeout"); });
+' 2>/dev/null) || HJY_CHECK="error"
+
+if [ "$HJY_CHECK" = "no_cdp" ] || [ "$HJY_CHECK" = "timeout" ] || [ "$HJY_CHECK" = "error" ]; then
+  echo "$LOG_PREFIX ❌ CDP Chrome 9222 不在线 ($HJY_CHECK)"
+  exit 1
+fi
+echo "$LOG_PREFIX ✅ CDP Chrome 在线"
+
+if [ "$HJY_CHECK" = "no_hjy" ]; then
+  echo "$LOG_PREFIX ❌ 没找到 hjy.huice.com 标签页"
+  exit 1
+fi
+echo "$LOG_PREFIX ✅ 慧经营标签页存在"
+
+# 采前一天商品数据
+echo "$LOG_PREFIX 📅 采集前一天数据..."
+"$NODE_BIN" tools/huice-export-cdp.mjs --days 1 || echo "$LOG_PREFIX ⚠️ 商品采集失败"
+
+# 写入 dts storage
+echo "$LOG_PREFIX 📤 写入 dts storage..."
+"$NODE_BIN" tools/write-storage.mjs --days 1 || echo "$LOG_PREFIX ⚠️ 写入 storage 失败"
+
+# 店铺维度日报
+YESTERDAY=$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d "yesterday" +%Y-%m-%d)
+echo "$LOG_PREFIX 🏪 采集店铺日报 $YESTERDAY ..."
+"$NODE_BIN" "$PROJECT_DIR/tools/huice-shop-export-cdp.mjs" --dates "$YESTERDAY" || echo "$LOG_PREFIX ⚠️ 店铺日报失败"
+
+# 拼多多推广费
+echo "$LOG_PREFIX 📣 采集拼多多推广费 $YESTERDAY ..."
+"$NODE_BIN" "$PROJECT_DIR/tools/pdd-promo-cdp.mjs" --dates "$YESTERDAY" || echo "$LOG_PREFIX ⚠️ 推广费采集失败"
+
+echo "$LOG_PREFIX ✅ 每日同步完成"
+DAILY_EOF
+
+# 替换占位符
+sed -i '' "s|__NODE_BIN__|$NODE_BIN|g" "$LOCAL_BIN/daima-huice-daily.sh"
+sed -i '' "s|__PROJECT_DIR__|$SCRIPT_DIR|g" "$LOCAL_BIN/daima-huice-daily.sh"
+chmod +x "$LOCAL_BIN/daima-huice-daily.sh"
+
+echo -e "  ${GREEN}✅ wrapper 脚本已安装到 $LOCAL_BIN${NC}"
+
+# --- 写 plist 文件 (用 /bin/bash 调用 wrapper,加 PATH+HOME 环境变量) ---
 
 # cdp-chrome: 开机自启动
 CDP_PLIST="$LAUNCH_DIR/com.daima.cdp-chrome.plist"
@@ -141,7 +295,8 @@ cat > "$CDP_PLIST" << EOF
     <string>com.daima.cdp-chrome</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$SCRIPT_DIR/scripts/start-cdp-chrome.sh</string>
+        <string>/bin/bash</string>
+        <string>$LOCAL_BIN/daima-cdp-chrome.sh</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -151,6 +306,13 @@ cat > "$CDP_PLIST" << EOF
     <string>/tmp/cdp-chrome-launchd.log</string>
     <key>StandardErrorPath</key>
     <string>/tmp/cdp-chrome-launchd.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>HOME</key>
+        <string>$HOME</string>
+    </dict>
 </dict>
 </plist>
 EOF
@@ -166,7 +328,8 @@ cat > "$DAILY_PLIST" << EOF
     <string>com.daima.huice-daily</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$SCRIPT_DIR/scripts/huice-daily.sh</string>
+        <string>/bin/bash</string>
+        <string>$LOCAL_BIN/daima-huice-daily.sh</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict>
@@ -201,7 +364,8 @@ cat > "$SERVER_PLIST" << EOF
     <string>com.daima.huice-server</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$SCRIPT_DIR/scripts/start-huice-server.sh</string>
+        <string>/bin/bash</string>
+        <string>$LOCAL_BIN/daima-huice-server.sh</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -211,6 +375,13 @@ cat > "$SERVER_PLIST" << EOF
     <string>/tmp/huice-server-launchd.log</string>
     <key>StandardErrorPath</key>
     <string>/tmp/huice-server-launchd.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>HOME</key>
+        <string>$HOME</string>
+    </dict>
 </dict>
 </plist>
 EOF
@@ -231,8 +402,8 @@ echo ""
 
 # === 6. 启动 HTTP 服务 + CDP Chrome ===
 echo -e "${YELLOW}[6/6] 启动 HTTP 服务 + CDP Chrome...${NC}"
-bash scripts/start-huice-server.sh 2>/dev/null || true
-bash scripts/start-cdp-chrome.sh 2>/dev/null || true
+bash "$LOCAL_BIN/daima-huice-server.sh" 2>/dev/null || true
+bash "$LOCAL_BIN/daima-cdp-chrome.sh" 2>/dev/null || true
 echo ""
 
 # === 完成 ===

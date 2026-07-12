@@ -551,3 +551,18 @@ left.querySelector('.el-icon-arrow-left:not(.el-icon-d-arrow-left)')
   - **修复**: 等待时间从 3s 改为 5s
   - **教训**: **页面切日期后数据刷新有延迟! 等不够会读到旧数据!**
   - **影响文件**: `tools/pdd-promo-cdp.mjs` 主循环
+
+- [2026-07-12] LaunchAgent exit code 126 -> 根因:TCC + node 路径 + set -e + curl -> 修复:wrapper 脚本放 ~/.local/bin
+  - **现象**: 3 个 LaunchAgent (cdp-chrome/huice-daily/huice-server) 全部 exit code 126,日志 "Operation not permitted"
+  - **根因 1**: macOS TCC 保护阻止 launchd 直接执行 ~/Documents 下的脚本
+  - **根因 2**: nvm 安装的 node 不在 launchd 默认 PATH 里,nohup node 报 "No such file or directory"
+  - **根因 3**: huice-daily.sh 的 `set -e` + curl|python3 管道,管道返回非零导致脚本提前退出
+  - **根因 4**: launchd 环境下 curl 连 127.0.0.1 行为异常,标签页检查失败
+  - **修复**: 
+    1. wrapper 脚本放 ~/.local/bin/(非 TCC 保护目录),逻辑内联不 exec ~/Documents 下的脚本
+    2. node 用绝对路径 ~/.nvm/versions/node/vXX/bin/node
+    3. 去掉 set -e,每步用 `|| echo` 容错
+    4. 用 node 原生 http 模块替代 curl+python3 检查 CDP 和标签页
+    5. plist 用 /bin/bash 显式调用 wrapper,加 PATH+HOME 环境变量
+  - **教训**: **launchd 环境 ≠ 终端环境! TCC/PATH/行为 全不同! 脚本要自包含!**
+  - **影响文件**: `install.sh` (LaunchAgent 安装部分)
