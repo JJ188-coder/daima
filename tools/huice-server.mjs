@@ -198,14 +198,23 @@ async function handler(req, res) {
         if (day.missing) {
           return { date: day.date, missing: true };
         }
-        // 慧经营数据
+        // 慧经营数据(慧经营导出的净利润里推广费为0,需要减去拼多多推广费)
         const salesAmount = day.sales_amount;
-        const netProfit = day.net_profit;
-        const netProfitRate = day.net_profit_rate;
+        const huiceNetProfit = day.net_profit;
+        const huiceNetProfitRate = day.net_profit_rate;
         // 拼多多推广数据(从独立表读)
         const promo = promoByDate.get(day.date);
         const promoSpend = promo?.promo_spend ?? null;
         const roi = promo?.roi ?? null;
+
+        // 净利润 = 慧经营净利润 - 推广费
+        const netProfit = (huiceNetProfit != null && promoSpend != null)
+          ? huiceNetProfit - promoSpend
+          : huiceNetProfit;
+        // 净利率 = 修正后净利润 / 销售额
+        const netProfitRate = (netProfit != null && salesAmount > 0)
+          ? netProfit / salesAmount
+          : huiceNetProfitRate;
         // 用拼多多推广费算费比
         const promoFeeRatio = (promoSpend != null && salesAmount > 0) ? promoSpend / salesAmount : null;
         const breakEvenRoi = netProfitRate && netProfitRate > 0 ? 1 / netProfitRate : null;

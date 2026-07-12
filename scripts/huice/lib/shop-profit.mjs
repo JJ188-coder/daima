@@ -44,13 +44,19 @@ export function toPercent(value) {
 
 export function buildStoreReportDay({ date, shop }) {
   const salesAmount = toNumber(shop?.salesAmount);
-  const netProfit = toNumber(shop?.netProfit);
+  const huiceNetProfit = toNumber(shop?.netProfit);
   const promoSpend = toNumber(shop?.promoSpend);
-  const exportedNetProfitRate = toNumber(shop?.netProfitRate);
   const exportedPromoFeeRatio = toNumber(shop?.promoFeeRatio);
   const exportedRoi = toNumber(shop?.roi);
-  const netProfitRate =
-    exportedNetProfitRate ?? (salesAmount && netProfit != null ? netProfit / salesAmount : null);
+
+  // 净利润 = 慧经营净利润 - 推广费(慧经营导出的净利润里推广费为0)
+  const netProfit = (huiceNetProfit != null && promoSpend != null)
+    ? huiceNetProfit - promoSpend
+    : huiceNetProfit;
+  // 净利率 = 修正后净利润 / 销售额
+  const netProfitRate = (netProfit != null && salesAmount > 0)
+    ? netProfit / salesAmount
+    : null;
   const promoFeeRatio =
     exportedPromoFeeRatio ?? (salesAmount && promoSpend != null ? promoSpend / salesAmount : null);
   const roi = exportedRoi ?? (promoSpend ? salesAmount / promoSpend : null);

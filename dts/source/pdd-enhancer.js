@@ -960,7 +960,7 @@ async function getPromoDataByWindow(window) {
       html += '<th style="padding:4px 8px;border:1px solid #722ed1;text-align:right;">净利率</th>';
       html += '<th style="padding:4px 8px;border:1px solid #722ed1;text-align:right;">净利润额</th>';
       html += '</tr></thead><tbody>';
-      const summaryStyle = summaryIsLoss ? 'color:#f5222d;font-weight:700;' : 'color:#722ed1;font-weight:700;';
+      const summaryStyle = summaryIsLoss ? 'color:#f5222d;font-weight:700;' : 'color:#333;font-weight:700;';
       html += '<tr style="' + summaryStyle + ';">';
       html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;">合计</td>';
       html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtMoney(sumSales) + '</td>';
