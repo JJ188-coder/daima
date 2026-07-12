@@ -978,6 +978,7 @@ async function getPromoDataByWindow(window) {
     html += '<table style="width:100%;border-collapse:collapse;font-size:12px;">';
     html += '<thead><tr style="background:#f9f0ff;">';
     html += '<th style="padding:4px 8px;border:1px solid #e8e8e8;text-align:left;">日期</th>';
+    html += '<th style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">销售额</th>';
     html += '<th style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">推广费用</th>';
     html += '<th style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">ROI</th>';
     html += '<th style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">保本ROI</th>';
@@ -993,8 +994,9 @@ async function getPromoDataByWindow(window) {
       html += '<tr style="' + (missing ? 'color:#ccc;' : style) + '">';
       html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;">' + day.date + '</td>';
       if (missing) {
-        html += '<td colspan="6" style="padding:4px 8px;border:1px solid #e8e8e8;text-align:center;">--</td>';
+        html += '<td colspan="7" style="padding:4px 8px;border:1px solid #e8e8e8;text-align:center;">--</td>';
       } else {
+        html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtMoney(day.salesAmount) + '</td>';
         html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtMoney(day.promoSpend) + '</td>';
         html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtRatio(day.roi) + '</td>';
         html += '<td style="padding:4px 8px;border:1px solid #e8e8e8;text-align:right;">' + fmtRatio(day.breakEvenRoi) + '</td>';
