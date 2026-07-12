@@ -88,33 +88,36 @@ async function cdpEval(ws, expression) {
   return res.result?.result?.value;
 }
 
-/** 关闭弹窗和通知（"我知道了"在 el-notification 里不是 button,需要特殊处理） */
+/** 关闭弹窗和通知 - 循环直到全部关完 */
 async function closePopups(ws) {
-  await cdpEval(ws, `(() => {
-    // 1. 关 button 类型的通知
-    document.querySelectorAll('button, .el-button').forEach(el => {
-      const t = (el.innerText || '').trim().replace(/\\s/g, '');
-      if (['我知道了', '300S后关闭', '确定', '关闭', '取消'].includes(t) && el.offsetParent !== null) el.click();
-    });
-    // 2. 关 el-notification 里的"我知道了"(文字不是 button,在 .el-notification__content 里)
-    document.querySelectorAll('.el-notification').forEach(n => {
-      if (n.offsetParent === null) return;
-      const text = n.innerText || '';
-      if (text.includes('我知道了')) {
-        // 找包含"我知道了"的可点击元素
-        const clickTarget = [...n.querySelectorAll('*')].find(el => 
-          (el.innerText || '').trim() === '我知道了' && el.offsetParent !== null
-        );
-        if (clickTarget) clickTarget.click();
-      }
-    });
-    // 3. 直接移除 el-notification DOM(兜底)
-    document.querySelectorAll('.el-notification').forEach(n => {
-      if (n.offsetParent !== null) n.style.display = 'none';
-    });
-    return 'ok';
-  })()`);
-  await sleep(800);
+  for (let round = 0; round < 10; round++) {
+    const count = await cdpEval(ws, `(() => {
+      let closed = 0;
+      // 1. 关 button 类型的通知
+      document.querySelectorAll('button, .el-button').forEach(el => {
+        const t = (el.innerText || '').trim().replace(/\\s/g, '');
+        if (['我知道了', '300S后关闭', '确定', '关闭', '取消'].includes(t) && el.offsetParent !== null) { el.click(); closed++; }
+      });
+      // 2. 关 el-notification 里的"我知道了"
+      document.querySelectorAll('.el-notification').forEach(n => {
+        if (n.offsetParent === null) return;
+        if ((n.innerText || '').includes('我知道了')) {
+          const clickTarget = [...n.querySelectorAll('*')].find(el => 
+            (el.innerText || '').trim() === '我知道了' && el.offsetParent !== null
+          );
+          if (clickTarget) { clickTarget.click(); closed++; }
+        }
+      });
+      // 3. 兜底: 直接隐藏
+      document.querySelectorAll('.el-notification').forEach(n => {
+        if (n.offsetParent !== null) { n.style.display = 'none'; closed++; }
+      });
+      return closed;
+    })()`);
+    if (count === 0) break;  // 全关完了
+    await sleep(500);
+  }
+  await sleep(500);
 }
 
 /** 切换到"更多店铺展示"Tab（#tab-DIM） */
