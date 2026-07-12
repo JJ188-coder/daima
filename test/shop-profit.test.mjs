@@ -9,7 +9,7 @@ import {
   resolveShopCandidates,
 } from '../scripts/huice/lib/shop-profit.mjs';
 
-test('uses Huice real shop net profit without product-level estimated deductions', () => {
+test('subtracts promo spend from Huice net profit (Huice export has promo=0)', () => {
   const row = buildStoreReportDay({
     date: '2026-07-09',
     shop: {
@@ -20,19 +20,40 @@ test('uses Huice real shop net profit without product-level estimated deductions
     },
   });
 
-  assert.equal(row.netProfit, 125);
-  assert.equal(row.netProfitRate, 0.125);
-  assert.equal(row.breakEvenRoi, 8);
+  // 净利润 = 慧经营净利润 125 - 推广费 100 = 25
+  assert.equal(row.netProfit, 25);
+  // 净利率 = 25 / 1000 = 0.025
+  assert.equal(row.netProfitRate, 0.025);
+  // 保本ROI = 1 / 0.025 = 40
+  assert.equal(row.breakEvenRoi, 40);
   assert.equal(row.promoFeeRatio, 0.1);
   assert.equal(row.roi, 10);
 });
 
-test('marks the whole store day as loss when Huice real net profit is negative', () => {
+test('keeps Huice net profit when promo spend is null', () => {
+  const row = buildStoreReportDay({
+    date: '2026-07-09',
+    shop: {
+      salesAmount: 1000,
+      promoSpend: null,
+      netProfit: 125,
+    },
+  });
+
+  // 没有推广费数据时不扣减
+  assert.equal(row.netProfit, 125);
+  assert.equal(row.netProfitRate, 0.125);
+});
+
+test('marks the whole store day as loss when net profit after promo is negative', () => {
   const row = buildStoreReportDay({
     date: '2026-07-09',
     shop: { salesAmount: 1000, promoSpend: 100, netProfit: -1 },
   });
 
+  // 净利润 = -1 - 100 = -101, 亏损
+  assert.equal(row.netProfit, -101);
+  assert.equal(row.netProfitRate, -0.101);
   assert.equal(row.breakEvenRoi, null);
   assert.equal(row.isLoss, true);
 });
