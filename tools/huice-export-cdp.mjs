@@ -19,7 +19,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bulkUpsertProductProfit, getDbPath } from '../scripts/huice/lib/db.mjs';
 import { collectorExitCode, createCollectorResult, markCollectorFailure } from '../scripts/huice/lib/collector-result.mjs';
-import { isExpectedExportTask } from '../scripts/huice/lib/export-validation.mjs';
+import { decideExportPoll, normalizeExportTask, pickExportTask } from '../scripts/huice/lib/export-flow.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -41,6 +41,13 @@ function dateStr(offset = 0) {
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function snapshotDownloadFiles() {
+  return new Map(readdirSync(DOWNLOAD_DIR).map(name => {
+    const stat = statSync(path.join(DOWNLOAD_DIR, name));
+    return [name, { mtimeMs: stat.mtimeMs, size: stat.size }];
+  }));
+}
 
 async function cdpCall(ws, method, params = {}) {
   return new Promise((resolve, reject) => {
@@ -177,28 +184,158 @@ async function setDateRangeByPanel(ws, targetDate) {
   return dateVals;
 }
 
-/** 等待新的 xlsx 下载完成 */
-async function waitForNewXlsx(beforeMtime, timeout = 60000) {
+/** 等待新的 xlsx 下载完成并通过目标日期/报表类型校验 */
+async function waitForNewXlsx(beforeFiles, { targetDate, validator, timeout = 60000 } = {}) {
+  const validate = validator || (xlsxPath => parseXlsx(xlsxPath, targetDate));
   const start = Date.now();
+  const observations = new Map();
   while (Date.now() - start < timeout) {
     await sleep(2000);
-    const files = readdirSync(DOWNLOAD_DIR).filter(f => f.includes('商品排名导出'));
+    const files = readdirSync(DOWNLOAD_DIR).filter(f => f.endsWith('.xlsx') && !f.endsWith('.crdownload'));
     for (const f of files) {
       const fullPath = path.join(DOWNLOAD_DIR, f);
       const stat = statSync(fullPath);
-      if (stat.mtimeMs > beforeMtime && stat.size > 5000) {
-        let lastSize = 0;
-        for (let i = 0; i < 10; i++) {
-          const size = statSync(fullPath).size;
-          if (size === lastSize && size > 5000) return fullPath;
-          lastSize = size;
-          await sleep(1000);
-        }
-        return fullPath;
+      const before = beforeFiles.get(f);
+      if (stat.size <= 5000 || (before && stat.mtimeMs <= before.mtimeMs && stat.size === before.size)) continue;
+      const signature = `${stat.size}:${stat.mtimeMs}`;
+      const previous = observations.get(f);
+      const stableCount = previous?.size === stat.size ? previous.stableCount + 1 : 0;
+      const observation = { size: stat.size, stableCount, invalidSignature: previous?.invalidSignature || '' };
+      observations.set(f, observation);
+      if (stableCount < 2 || observation.invalidSignature === signature) continue;
+      try {
+        return { path: fullPath, value: validate(fullPath) };
+      } catch {
+        observation.invalidSignature = signature;
       }
     }
   }
   return null;
+}
+
+async function collectDownloadCenterTasks(ws) {
+  return await cdpEval(ws, `(() => {
+    const gridElement = document.querySelector('.v-ag-grid');
+    const gridApi = gridElement?.__vue__?.gridApi;
+    if (gridApi?.forEachNode) {
+      const tasks = [];
+      gridApi.forEachNode(node => {
+        const data = node.data;
+        if (!data || data.id == null) return;
+        const statusName = String(data.statusName || '');
+        const hasDownload = data.download === true || data.download === 1 || data.download === '1';
+        const statusAllowsDownload = /待下载|可下载|完成/.test(statusName) && !/已下载|失败|生成中|处理中|等待中|排队中/.test(statusName);
+        tasks.push({
+          id: String(data.id),
+          rowIndex: node.rowIndex == null ? '' : String(node.rowIndex),
+          text: [data.taskName, data.updateTime, data.createrName, statusName].filter(Boolean).map(String).join(' '),
+          buttonText: '下载',
+          buttonVisible: hasDownload && statusAllowsDownload,
+        });
+      });
+      if (tasks.length) return tasks;
+    }
+
+    const roots = ['.ag-center-cols-container', '.ag-pinned-left-cols-container', '.ag-pinned-right-cols-container'];
+    const rows = new Map();
+    const getImmutableTaskId = row => row.getAttribute('data-task-id') || row.getAttribute('task-id') || '';
+    for (const rootSelector of roots) {
+      for (const row of document.querySelectorAll(rootSelector + ' .ag-row')) {
+        const rowIndex = row.getAttribute('row-index') || '';
+        const id = getImmutableTaskId(row);
+        const logicalKey = id || rowIndex;
+        if (!logicalKey) continue;
+        const current = rows.get(logicalKey) || { id, rowIndex, textParts: [], buttonText: '', buttonVisible: false };
+        const text = (row.innerText || '').trim();
+        if (text) current.textParts.push(text);
+        const operation = row.querySelector('[col-id="operation"]') || [...row.querySelectorAll('.ag-cell')].find(cell => cell.getAttribute('col-id') === 'operation');
+        const button = operation?.querySelector('button, .el-button, [role=button]');
+        if (button) {
+          current.buttonText = (button.innerText || button.textContent || '').trim();
+          current.buttonVisible = button.offsetParent !== null && !button.disabled;
+        }
+        rows.set(logicalKey, current);
+      }
+    }
+    return [...rows.values()].map(row => ({ ...row, text: [...new Set(row.textParts)].join(' ') }));
+  })()`);
+}
+
+async function queryDownloadCenter(ws) {
+  const result = await cdpEval(ws, `(() => {
+    const button = [...document.querySelectorAll('button, .el-button')]
+      .find(item => (item.innerText || '').trim() === '查询' && item.offsetParent !== null && !item.disabled);
+    if (!button) return { ok: false, reason: 'download center query button not found' };
+    button.click();
+    return { ok: true };
+  })()`);
+  if (!result?.ok) throw new Error(result?.reason || 'download center query failed');
+  await sleep(4000);
+}
+
+async function collectDownloadCenterBaseline(ws) {
+  await cdpEval(ws, 'location.href = "https://hjy.huice.com/#/baseSettings/downloadCenter"');
+  await sleep(4000);
+  await queryDownloadCenter(ws);
+  const tasks = await collectDownloadCenterTasks(ws);
+  return tasks.map(task => normalizeExportTask(task).key);
+}
+
+async function downloadFromCenter(ws, criteria) {
+  await cdpEval(ws, 'location.href = "https://hjy.huice.com/#/baseSettings/downloadCenter"');
+  await sleep(4000);
+  await queryDownloadCenter(ws);
+  const maxAttempts = 20;
+  let lastDecision = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const tasks = await collectDownloadCenterTasks(ws);
+    const taskDecision = pickExportTask(tasks, criteria);
+    const poll = decideExportPoll({ attempt, maxAttempts, refreshEvery: 3, taskDecision });
+    lastDecision = poll;
+    if (poll.action === 'click') {
+      const selected = taskDecision.selected;
+      const clicked = await cdpEval(ws, `(async () => {
+        const selectedTaskId = ${JSON.stringify(selected.id)};
+        const roots = ['.ag-center-cols-container', '.ag-pinned-left-cols-container', '.ag-pinned-right-cols-container'];
+        const gridApi = document.querySelector('.v-ag-grid')?.__vue__?.gridApi;
+        if (!selectedTaskId || !gridApi?.forEachNode) return { ok: false, reason: 'selected task row unavailable' };
+        let selectedRowIndex = null;
+        gridApi.forEachNode(node => {
+          if (String(node.data?.id ?? '') === selectedTaskId && node.rowIndex != null) selectedRowIndex = node.rowIndex;
+        });
+        if (selectedRowIndex == null) return { ok: false, reason: 'selected task row unavailable' };
+        gridApi.ensureIndexVisible(selectedRowIndex, 'middle');
+        if (gridApi.ensureColumnVisible) gridApi.ensureColumnVisible('operation');
+        else gridApi.columnApi?.ensureColumnVisible?.('operation');
+        const rowIndexText = String(selectedRowIndex);
+        for (let clickAttempt = 0; clickAttempt < 6; clickAttempt++) {
+          await new Promise(resolve => setTimeout(resolve, 150));
+          for (const rootSelector of roots) {
+            const row = [...document.querySelectorAll(rootSelector + ' .ag-row')]
+              .find(item => item.getAttribute('row-index') === rowIndexText);
+            const operation = row?.querySelector('[col-id="operation"]');
+            const button = operation?.querySelector('button, .el-button, [role=button]');
+            if (button && (button.innerText || '').trim().replace(/\\s/g, '') === '下载' && button.offsetParent !== null && !button.disabled) {
+              button.click();
+              return { ok: true };
+            }
+          }
+        }
+        return { ok: false, reason: 'selected task download button disappeared' };
+      })()`);
+      if (!clicked?.ok) return { ok: false, reason: clicked?.reason || 'download click failed', candidates: poll.candidates };
+      return { ok: true, taskKey: poll.taskKey };
+    }
+    if (poll.action === 'fail') return { ok: false, reason: poll.reason, candidates: poll.candidates };
+    if (poll.action === 'reload') {
+      await cdpEval(ws, 'location.reload()');
+      await sleep(4000);
+      await queryDownloadCenter(ws);
+    } else {
+      await sleep(1500);
+    }
+  }
+  return { ok: false, reason: lastDecision?.reason || 'task_timeout', candidates: lastDecision?.candidates || [] };
 }
 
 /** 解析 xlsx -> records 数组 */
@@ -208,10 +345,22 @@ import openpyxl, json, sys
 wb = openpyxl.load_workbook('${xlsxPath}')
 ws = wb.active
 rows = list(ws.iter_rows(values_only=True))
-all_text = '\\n'.join(' '.join(str(c) for c in row if c is not None) for row in rows)
-if '${targetDate}' not in all_text and '${targetDate.replace(/-/g, '/')}' not in all_text:
-    raise ValueError('target date missing from export')
-if not any(any('商品ID' in str(c) or '商品编号' in str(c) for c in row if c is not None) for row in rows):
+date_range = None
+for row in rows:
+    for index, cell in enumerate(row):
+        if str(cell).strip() != '日期':
+            continue
+        value = str(row[index + 1]).strip() if index + 1 < len(row) and row[index + 1] is not None else ''
+        match = __import__('re').match(r'^(\\d{4}-\\d{2}-\\d{2})\\s*[~至]\\s*(\\d{4}-\\d{2}-\\d{2})$', value)
+        if match:
+            date_range = match.groups()
+            break
+    if date_range:
+        break
+if date_range != ('${targetDate}', '${targetDate}'):
+    raise ValueError('single-day date range mismatch')
+product_identity_headers = {'链接ID', '商品ID', '商品编号'}
+if not any(any(str(c).strip() in product_identity_headers for c in row if c is not None) for row in rows):
     raise ValueError('product ID header missing from export')
 records = []
 for row in rows[11:]:
@@ -317,6 +466,7 @@ async function main() {
 
   const allRecords = [];
   const failedDates = result.failedDates;
+  const consumedTaskKeys = new Set();
 
   for (let i = 0; i < dateList.length; i++) {
     const targetDate = dateList[i];
@@ -352,102 +502,113 @@ async function main() {
     }
 
     // 2. 点查询
-    await cdpEval(ws, `(() => {
+    const queryResult = await cdpEval(ws, `(() => {
       const btn = [...document.querySelectorAll('button, .el-button')].find(b =>
-        (b.innerText || '').trim() === '查询' || (b.innerText || '').trim() === '搜索'
+        ((b.innerText || '').trim() === '查询' || (b.innerText || '').trim() === '搜索') &&
+        b.offsetParent !== null && !b.disabled
       );
-      if (btn) btn.click();
-      return 'ok';
-    })()`);
-    await sleep(5000);
-
-    // 3. 点下载按钮（toolbar-right 里的 #icon-download）
-    await cdpEval(ws, `(() => {
-      const btns = [...document.querySelectorAll('button')];
-      const downloadBtn = btns.find(b => {
-        const use = b.querySelector('use');
-        if (!use) return false;
-        const href = use.getAttribute('href') || use.getAttributeNS('http://www.w3.org/1999/xlink', 'href') || '';
-        return href === '#icon-download';
-      });
-      if (downloadBtn) downloadBtn.click();
-      return 'ok';
-    })()`);
-    await sleep(1500);
-
-    // 4. 点「导出全部」
-    const exportRequestedAt = Date.now();
-    await cdpEval(ws, `(() => {
-      const items = [...document.querySelectorAll('.el-popover *')];
-      const exportAll = items.find(el => (el.innerText || '').trim() === '导出全部');
-      if (exportAll) exportAll.click();
-      return 'ok';
-    })()`);
-
-    // 等慧经营后台生成 xlsx
-    await sleep(6000);
-
-    // 关闭「导出完成」提示
-    await cdpEval(ws, `(() => {
-      const btn = [...document.querySelectorAll('button, .el-button')].find(b =>
-        (b.innerText || '').trim() === '我知道了'
-      );
-      if (btn) btn.click();
-      return 'ok';
-    })()`);
-
-    // 5. 去下载中心下载 xlsx
-    await cdpEval(ws, 'location.href = "https://hjy.huice.com/#/baseSettings/downloadCenter"');
-    await sleep(4000);
-
-    const beforeMtime = Date.now();
-
-    // 只下载本次导出后生成的商品排名任务，禁止按第一行猜测。
-    const tasks = await cdpEval(ws, `(() => {
-      const grid = document.querySelector('.ag-root');
-      if (!grid) return [];
-      return [...grid.querySelectorAll('.ag-center-cols-container .ag-row')].map(row => ({
-        rowIndex: row.getAttribute('row-index'),
-        text: row.innerText || '',
-      }));
-    })()`);
-    const task = Array.isArray(tasks) && tasks.find(candidate =>
-      isExpectedExportTask(candidate, { kind: 'product', targetDate, after: exportRequestedAt })
-    );
-    const downloadResult = task ? await cdpEval(ws, `(() => {
-      const row = [...document.querySelectorAll('.ag-center-cols-container .ag-row')]
-        .find(item => item.getAttribute('row-index') === ${JSON.stringify(task.rowIndex)});
-      const opCell = [...(row?.querySelectorAll('.ag-cell') || [])]
-        .find(cell => cell.getAttribute('col-id') === 'operation');
-      const btn = opCell?.querySelector('button');
-      if (!btn) return 'no matching task button';
+      if (!btn) return { ok: false, reason: 'query button not found' };
       btn.click();
-      return 'ok';
-    })()`) : 'no matching task';
-    if (downloadResult !== 'ok') {
-      console.log(`  ⚠️ 下载中心没有匹配任务,跳过`);
-      markCollectorFailure(result, targetDate, 'matching download task not found');
+      return { ok: true };
+    })()`);
+    if (!queryResult?.ok) {
+      markCollectorFailure(result, targetDate, queryResult?.reason || 'query failed');
       continue;
     }
+    await sleep(5000);
+
+    // 3. 提交导出前先记录下载中心已有任务。
+    const baselineTaskKeys = await collectDownloadCenterBaseline(ws);
+    await cdpEval(ws, 'location.href = "https://hjy.huice.com/#/opertData/CommodityAnalysis"');
+    await sleep(4000);
+    const restoredDate = await setDateRangeByPanel(ws, targetDate);
+    if (restoredDate?.start !== targetDate || restoredDate?.end !== targetDate) {
+      markCollectorFailure(result, targetDate, 'date restore failed before export');
+      continue;
+    }
+    const restoredQuery = await cdpEval(ws, `(() => {
+      const btn = [...document.querySelectorAll('button, .el-button')].find(b =>
+        ((b.innerText || '').trim() === '查询' || (b.innerText || '').trim() === '搜索') &&
+        b.offsetParent !== null && !b.disabled
+      );
+      if (!btn) return { ok: false, reason: 'query button not found' };
+      btn.click();
+      return { ok: true };
+    })()`);
+    if (!restoredQuery?.ok) {
+      markCollectorFailure(result, targetDate, restoredQuery?.reason || 'query restore failed');
+      continue;
+    }
+    await sleep(5000);
+
+    const downloadMenuResult = await cdpEval(ws, `(() => {
+      const downloadBtn = [...document.querySelectorAll('button')].find(b => {
+        const use = b.querySelector('use');
+        const href = use?.getAttribute('href') || use?.getAttributeNS('http://www.w3.org/1999/xlink', 'href') || '';
+        return href === '#icon-download' && b.offsetParent !== null && !b.disabled;
+      });
+      if (!downloadBtn) return { ok: false, reason: 'download toolbar button not found' };
+      downloadBtn.click();
+      return { ok: true };
+    })()`);
+    if (!downloadMenuResult?.ok) {
+      markCollectorFailure(result, targetDate, downloadMenuResult?.reason || 'export menu open failed');
+      continue;
+    }
+    await sleep(1500);
+
+    // 4. 只在当前可见 popover 内点「导出全部」。
+    const exportResult = await cdpEval(ws, `(() => {
+      const popovers = [...document.querySelectorAll('.el-popover, .el-dropdown-menu')]
+        .filter(el => el.offsetParent !== null || el.classList.contains('is-visible'));
+      const popover = popovers.find(el => (el.innerText || '').includes('导出全部'));
+      if (!popover) return { ok: false, reason: 'export menu not found' };
+      const control = [...popover.querySelectorAll('button, .el-button, li, [role=menuitem], *')]
+        .find(el => (el.innerText || '').trim() === '导出全部' && el.offsetParent !== null);
+      if (!control) return { ok: false, reason: 'export all control not found' };
+      const requestedAt = Date.now();
+      control.click();
+      return { ok: true, requestedAt };
+    })()`);
+    if (!exportResult?.ok) {
+      markCollectorFailure(result, targetDate, exportResult?.reason || 'export submit failed');
+      continue;
+    }
+    const exportRequestedAt = exportResult.requestedAt;
+    await sleep(6000);
+
+    const beforeFiles = snapshotDownloadFiles();
+    const downloadResult = await downloadFromCenter(ws, {
+      kind: 'product',
+      requestedAt: exportRequestedAt,
+      baselineTaskKeys,
+      consumedTaskKeys: [...consumedTaskKeys],
+      clockSkewMs: 1000,
+    });
+    if (!downloadResult.ok) {
+      console.log(`  ⚠️ 下载中心失败: ${downloadResult.reason} ${JSON.stringify(downloadResult.candidates || [])}`);
+      markCollectorFailure(result, targetDate, `download center ${downloadResult.reason}`);
+      continue;
+    }
+    consumedTaskKeys.add(downloadResult.taskKey);
 
     // 等下载完成
-    const xlsxPath = await waitForNewXlsx(beforeMtime, 60000);
-    if (!xlsxPath) {
+    const downloadedXlsx = await waitForNewXlsx(beforeFiles, { targetDate, timeout: 60000 });
+    if (!downloadedXlsx) {
       console.log(`  ⚠️ 下载超时,跳过`);
       markCollectorFailure(result, targetDate, 'download timeout');
       continue;
     }
+    const xlsxPath = downloadedXlsx.path;
+    const records = downloadedXlsx.value;
     console.log(`  📄 下载完成: ${path.basename(xlsxPath)}`);
-
-    // 6. 解析并校验 xlsx
-    let records;
-    try {
-      records = parseXlsx(xlsxPath, targetDate);
-    } catch (error) {
-      console.log(`  ⚠️ xlsx 校验失败: ${error.message}`);
-      markCollectorFailure(result, targetDate, 'xlsx validation failed');
+    if (records.length === 0) {
+      console.log(`  ⚠️ xlsx 没有有效商品记录,跳过`);
+      markCollectorFailure(result, targetDate, 'no valid product records');
       continue;
     }
+
+    // 6. xlsx 已在等待阶段完成解析和校验
     const netProfitCount = records.filter(r => r.netProfit != null).length;
     console.log(`  ✅ ${records.length} 条 (netProfit 有值: ${netProfitCount})`);
 
@@ -476,15 +637,19 @@ async function main() {
     }
   }
 
-  const summaryFile = path.join(OUTPUT_DIR, 'huice-latest.json');
-  writeFileSync(summaryFile, JSON.stringify(allRecords, null, 2));
-  console.log(`💾 数据落盘: ${summaryFile} (${allRecords.length} 条)`);
+  if (allRecords.length > 0 && failedDates.length === 0 && !result.fatalError) {
+    const summaryFile = path.join(OUTPUT_DIR, 'huice-latest.json');
+    writeFileSync(summaryFile, JSON.stringify(allRecords, null, 2));
+    console.log(`💾 数据落盘: ${summaryFile} (${allRecords.length} 条)`);
+  } else {
+    console.log(`⚠️ 本次运行不完整或无数据,保留现有 huice-latest.json`);
+  }
   console.log(`✅ 回采完成`);
 
   // 失败日期汇总
   if (failedDates.length > 0) {
     const failLog = path.join(OUTPUT_DIR, 'failed-dates.json');
-    writeFileSync(failLog, JSON.stringify({ dates: failedDates, ts: new Date().toISOString() }, null, 2));
+    writeFileSync(failLog, JSON.stringify({ dates: failedDates, failures: result.failures, ts: new Date().toISOString() }, null, 2));
     console.log(`⚠️ ${failedDates.length} 天采集失败,已记录到 ${failLog}`);
     console.log(`   失败日期: ${failedDates.join(', ')}`);
     console.log(`   补采命令: node tools/huice-export-cdp.mjs --dates ${failedDates.join(',')}`);
