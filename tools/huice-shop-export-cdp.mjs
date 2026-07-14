@@ -27,7 +27,8 @@ import { fileURLToPath } from 'node:url';
 import { parseShopExportRows } from '../scripts/huice/lib/shop-profit.mjs';
 import { upsertShop, upsertShopDailyProfit, getDbPath } from '../scripts/huice/lib/db.mjs';
 import { collectorExitCode, createCollectorResult, markCollectorFailure } from '../scripts/huice/lib/collector-result.mjs';
-import { isExpectedExportTask, validateExportRows } from '../scripts/huice/lib/export-validation.mjs';
+import { validateExportRows } from '../scripts/huice/lib/export-validation.mjs';
+import { decideExportPoll, decideExportSubmitState, elementUiActiveDialogPredicateSource, normalizeExportTask, pickExportTask } from '../scripts/huice/lib/export-flow.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -67,6 +68,13 @@ export function buildShopExportArgs({ dates, days }) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+function snapshotDownloadFiles() {
+  return new Map(readdirSync(DOWNLOAD_DIR).map(name => {
+    const stat = statSync(path.join(DOWNLOAD_DIR, name));
+    return [name, { mtimeMs: stat.mtimeMs, size: stat.size }];
+  }));
+}
+
 // ============ CDP 工具函数 ============
 
 async function cdpCall(ws, method, params = {}) {
@@ -88,36 +96,31 @@ async function cdpEval(ws, expression) {
   return res.result?.result?.value;
 }
 
-/** 关闭弹窗和通知 - 循环直到全部关完 */
-async function closePopups(ws) {
+/** 只关闭无业务副作用的通知，不碰确定、取消、遮罩或未知弹窗 */
+async function dismissPassiveUi(ws) {
   for (let round = 0; round < 10; round++) {
-    const count = await cdpEval(ws, `(() => {
-      let closed = 0;
-      // 1. 关 button 类型的通知
-      document.querySelectorAll('button, .el-button').forEach(el => {
-        const t = (el.innerText || '').trim().replace(/\\s/g, '');
-        if (['我知道了', '300S后关闭', '确定', '关闭', '取消'].includes(t) && el.offsetParent !== null) { el.click(); closed++; }
-      });
-      // 2. 关 el-notification 里的"我知道了"
-      document.querySelectorAll('.el-notification').forEach(n => {
-        if (n.offsetParent === null) return;
-        if ((n.innerText || '').includes('我知道了')) {
-          const clickTarget = [...n.querySelectorAll('*')].find(el => 
-            (el.innerText || '').trim() === '我知道了' && el.offsetParent !== null
-          );
-          if (clickTarget) { clickTarget.click(); closed++; }
+    const result = await cdpEval(ws, `(() => {
+      const actions = [];
+      const containers = [...document.querySelectorAll('.el-notification, .el-message')]
+        .filter(el => el.offsetParent !== null);
+      for (const container of containers) {
+        const text = (container.innerText || '').trim();
+        const targets = [...container.querySelectorAll('button, .el-button, [role=button], .el-notification__closeBtn, .el-message__closeBtn, *')];
+        const target = targets.find(el => {
+          const label = (el.innerText || el.getAttribute?.('aria-label') || '').trim().replace(/\\s/g, '');
+          return ['我知道了', '300S后关闭', '关闭'].includes(label) && el.offsetParent !== null;
+        });
+        if (target) {
+          actions.push(text.slice(0, 120));
+          target.click();
         }
-      });
-      // 3. 兜底: 直接隐藏
-      document.querySelectorAll('.el-notification').forEach(n => {
-        if (n.offsetParent !== null) { n.style.display = 'none'; closed++; }
-      });
-      return closed;
+      }
+      return { count: actions.length, actions };
     })()`);
-    if (count === 0) break;  // 全关完了
-    await sleep(500);
+    if (!result?.count) break;
+    result.actions.forEach(text => console.log(`  🧹 已关闭通知: ${text}`));
+    await sleep(300);
   }
-  await sleep(500);
 }
 
 /** 切换到"更多店铺展示"Tab（#tab-DIM） */
@@ -310,201 +313,286 @@ async function setDateRangeByPanel(ws, targetDate) {
 
 /** 点查询按钮 */
 async function clickQuery(ws) {
-  await cdpEval(ws, `(() => {
+  const result = await cdpEval(ws, `(() => {
     const btn = [...document.querySelectorAll('button, .el-button')].find(b =>
-      (b.innerText || '').trim() === '查询' || (b.innerText || '').trim() === '搜索'
+      ((b.innerText || '').trim() === '查询' || (b.innerText || '').trim() === '搜索') &&
+      b.offsetParent !== null && !b.disabled
     );
-    if (btn) btn.click();
-    return 'ok';
+    if (!btn) return { ok: false, reason: 'query button not found' };
+    btn.click();
+    return { ok: true };
   })()`);
+  if (!result?.ok) throw new Error(result?.reason || 'query failed');
   await sleep(5000);
 }
 
-/** 点导出图标 -> 选"否" -> 关通知 -> 点"确 定" -> 等通知 */
+/** 点导出图标并在目标业务弹窗内选择"否"、提交 */
 async function clickExport(ws) {
-  // 1. 点导出图标
+  await dismissPassiveUi(ws);
   const exportResult = await cdpEval(ws, `(() => {
     const el = document.querySelector('${HUICE_SHOP_SELECTORS.exportIcon}');
-    if (el) { el.click(); return 'ok'; }
-    return 'no export icon';
+    if (!el || el.offsetParent === null) return { ok: false, reason: 'export icon not found' };
+    el.click();
+    return { ok: true };
   })()`);
-  console.log(`  📤 导出图标: ${exportResult}`);
-  await sleep(2000);
+  if (!exportResult?.ok) throw new Error(exportResult?.reason || 'export icon click failed');
+  console.log(`  📤 导出图标: 已点击`);
 
-  // 2. 选"否"
-  const noResult = await cdpEval(ws, `(() => {
-    const dialogs = [...document.querySelectorAll('.el-dialog')].filter(d => d.offsetParent !== null);
-    const target = dialogs.find(d => d.innerText.includes('分店铺'));
-    if (!target) return 'no dialog';
-    const labels = [...target.querySelectorAll('label.el-radio-button')];
-    const noLabel = labels.find(l => (l.innerText || '').trim() === '否');
-    if (!noLabel) return 'no 否 label';
-    if (!noLabel.classList.contains('is-active')) {
-      const input = noLabel.querySelector('input[type=radio]');
-      if (input) { input.click(); return 'clicked input'; }
-      noLabel.click(); return 'clicked label';
+  let dialogReady = false;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await sleep(250);
+    const probe = await cdpEval(ws, `(() => {
+      const isActiveDialog = ${elementUiActiveDialogPredicateSource};
+      const dialogs = [...document.querySelectorAll('.el-dialog, [role=dialog]')].filter(isActiveDialog);
+      const target = dialogs.find(d => (d.innerText || '').includes('分店铺'));
+      return target ? { found: true, text: (target.innerText || '').slice(0, 300) } : { found: false };
+    })()`);
+    if (probe?.found) { dialogReady = true; break; }
+    await dismissPassiveUi(ws);
+  }
+  if (!dialogReady) throw new Error('export options dialog not found');
+
+  const selection = await cdpEval(ws, `(() => {
+    const isActiveDialog = ${elementUiActiveDialogPredicateSource};
+    const dialogs = [...document.querySelectorAll('.el-dialog, [role=dialog]')].filter(isActiveDialog);
+    const target = dialogs.find(d => (d.innerText || '').includes('分店铺'));
+    if (!target) return { ok: false, reason: 'export options dialog disappeared' };
+    const labels = [...target.querySelectorAll('label.el-radio-button, label.el-radio')];
+    const noLabel = labels.find(l => (l.innerText || '').trim().replace(/\\s/g, '') === '否');
+    if (!noLabel) return { ok: false, reason: 'no option missing' };
+    const input = noLabel.querySelector('input[type=radio]');
+    if (!noLabel.classList.contains('is-active') && !input?.checked) (input || noLabel).click();
+    return { ok: true };
+  })()`);
+  if (!selection?.ok) throw new Error(selection?.reason || 'select no failed');
+
+  let selected = false;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    await sleep(200);
+    selected = await cdpEval(ws, `(() => {
+      const isActiveDialog = ${elementUiActiveDialogPredicateSource};
+      const dialogs = [...document.querySelectorAll('.el-dialog, [role=dialog]')].filter(isActiveDialog);
+      const target = dialogs.find(d => (d.innerText || '').includes('分店铺'));
+      const label = [...(target?.querySelectorAll('label.el-radio-button, label.el-radio') || [])]
+        .find(l => (l.innerText || '').trim().replace(/\\s/g, '') === '否');
+      return !!label && (label.classList.contains('is-active') || label.querySelector('input[type=radio]')?.checked);
+    })()`);
+    if (selected) break;
+  }
+  if (!selected) throw new Error('no option was not selected');
+  console.log(`  📤 分店铺选否: 已确认`);
+
+  const exportRequestedAt = Date.now();
+  const submitted = await cdpEval(ws, `(() => {
+    const isActiveDialog = ${elementUiActiveDialogPredicateSource};
+    const dialogs = [...document.querySelectorAll('.el-dialog, [role=dialog]')].filter(isActiveDialog);
+    const target = dialogs.find(d => (d.innerText || '').includes('分店铺'));
+    if (!target) return { ok: false, reason: 'export options dialog missing before submit' };
+    const noLabel = [...target.querySelectorAll('label.el-radio-button, label.el-radio')]
+      .find(l => (l.innerText || '').trim().replace(/\\s/g, '') === '否');
+    const noInput = noLabel?.querySelector('input[type=radio]');
+    if (!noLabel || (!noLabel.classList.contains('is-active') && !noInput?.checked)) {
+      return { ok: false, reason: 'no option lost selection before submit' };
     }
-    return 'already selected';
+    const confirm = [...target.querySelectorAll('button, .el-button')]
+      .find(b => (b.innerText || '').trim().replace(/\\s/g, '') === '确定' && b.offsetParent !== null && !b.disabled);
+    if (!confirm) return { ok: false, reason: 'scoped confirm button missing' };
+    const rect = confirm.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return { ok: false, reason: 'scoped confirm has no clickable rect' };
+    confirm.click();
+    return { ok: true };
   })()`);
-  console.log(`  📤 分店铺选否: ${noResult}`);
-  await sleep(500);
+  if (!submitted?.ok) throw new Error(submitted?.reason || 'export submit failed');
 
-  // 3. 先关残留通知(通知会遮住确定按钮)
-  await closePopups(ws);
-  await sleep(1000);
-
-  // 4. 找确定按钮坐标,用 CDP 鼠标点击(最可靠)
-  const coords = await cdpEval(ws, `(() => {
-    const dialogs = [...document.querySelectorAll('.el-dialog')].filter(d => d.offsetParent !== null);
-    const target = dialogs.find(d => d.innerText.includes('分店铺') || d.innerText.includes('导出'));
-    if (!target) return null;
-    const btns = [...target.querySelectorAll('button')];
-    const confirmBtn = btns.find(b => (b.innerText||'').trim().replace(/\\s/g, '') === '确定');
-    if (!confirmBtn) return null;
-    const rect = confirmBtn.getBoundingClientRect();
-    return JSON.stringify({ x: Math.round(rect.left + rect.width/2), y: Math.round(rect.top + rect.height/2) });
+  const readSubmitState = async () => await cdpEval(ws, `(() => {
+    const isActiveDialog = ${elementUiActiveDialogPredicateSource};
+    const dialogs = [...document.querySelectorAll('.el-dialog, [role=dialog]')];
+    const target = dialogs.find(d => (d.innerText || '').includes('分店铺'));
+    const wrapper = target?.closest?.('.el-dialog__wrapper');
+    const wrapperLeaving = !!wrapper && String(wrapper.className || '').includes('leave');
+    const dialogOpen = !!target && isActiveDialog(target);
+    const notices = [...document.querySelectorAll('.el-notification, .el-message')]
+      .filter(n => n.offsetParent !== null)
+      .map(n => (n.innerText || '').trim())
+      .filter(Boolean);
+    const taskEvidence = [...document.querySelectorAll('[class*=task], [class*=download], .ag-row')]
+      .filter(el => el.offsetParent !== null)
+      .map(el => (el.innerText || '').trim())
+      .find(text => /导出.{0,20}(生成中|处理中|排队|成功|已提交)|待下载/.test(text));
+    return { dialogOpen, wrapperLeaving, notices, taskEvidence: taskEvidence || '' };
   })()`);
 
-  if (coords) {
-    const { x, y } = JSON.parse(coords);
-    console.log(`  📤 确 定: CDP点击 (${x}, ${y})`);
-    await cdpCall(ws, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+  for (let poll = 0; poll < 40; poll++) {
     await sleep(300);
-    await cdpCall(ws, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
-    await sleep(100);
-    await cdpCall(ws, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-  } else {
-    console.log(`  📤 确 定: 坐标未找到,用 DOM click`);
-    await cdpEval(ws, `(() => {
-      const btns = [...document.querySelectorAll('button')].filter(b => b.offsetParent !== null);
-      const confirmBtn = btns.find(b => (b.innerText||'').trim().replace(/\\s/g, '') === '确定');
-      if (confirmBtn) { confirmBtn.click(); const span = confirmBtn.querySelector('span'); if (span) span.click(); return 'clicked'; }
-      return 'not found';
-    })()`);
-  }
-
-  // 5. 轮询关通知 + 等"我知道了"(最多 60 秒)
-  let gotNotification = false;
-  for (let i = 0; i < 30; i++) {
-    await sleep(2000);
-    await closePopups(ws);  // 每轮先关残留通知
-    const knowResult = await cdpEval(ws, `(() => {
-      const btn = [...document.querySelectorAll('button')].find(b => {
-        const t = (b.innerText || '').trim();
-        return t.includes('我知道了') || t.includes('300S') || t.includes('导出成功');
-      });
-      if (btn && btn.offsetParent !== null) { btn.click(); return 'clicked'; }
-      return 'not found';
-    })()`);
-    if (knowResult === 'clicked') {
-      console.log(`  📤 我知道了: 已关闭`);
-      gotNotification = true;
-      break;
+    const state = await readSubmitState();
+    if (state?.notices?.length) state.notices.forEach(text => console.log(`  📤 导出反馈: ${text.slice(0, 160)}`));
+    if (decideExportSubmitState(state) === 'accepted') {
+      await dismissPassiveUi(ws);
+      return exportRequestedAt;
     }
   }
 
-  if (!gotNotification) {
-    console.log(`  📤 未等到通知,继续`);
-  }
-  await sleep(2000);
+  throw new Error('export options dialog remained active after single scoped submit');
+
 }
 
 
-/** 去下载中心,等新任务出现再下载 */
-async function downloadFromCenter(ws, targetDate, exportRequestedAt) {
-  // 去下载中心
-  await cdpEval(ws, `location.href = "${DOWNLOAD_CENTER_URL}"`);
-  await sleep(3000);
-
-  // 关闭残留弹窗(等几秒自动消失,但残留多时需要手动关)
-  await closePopups(ws);
-  await sleep(3000);  // 等残留通知自动消失
-  await closePopups(ws);
-
-  // 点"查询"让 AG-Grid 加载数据
-  await cdpEval(ws, `(() => { const btn = [...document.querySelectorAll('button')].find(b => (b.innerText||'').trim() === '查询'); if (btn) btn.click(); return 'ok'; })()`);
-  await sleep(5000);
-
-  const beforeMtime = Date.now();
-
-  // 轮询等 AG-Grid 行加载 + 找下载按钮
-  let result = null;
-  for (let attempt = 0; attempt < 20; attempt++) {
-    // 每轮先关通知按钮(不点遮罩层,避免页面跳转)
-    await cdpEval(ws, `(() => {
-      document.querySelectorAll('button, .el-button').forEach(b => {
-        const t = (b.innerText || '').trim().replace(/\\s/g, '');
-        if (['我知道了', '300S后关闭', '确定', '关闭', '取消'].includes(t) && b.offsetParent !== null) b.click();
+/** 读取 AG-Grid 的逻辑行,合并 center/左右 pinned 区域。 */
+async function collectDownloadCenterTasks(ws) {
+  return await cdpEval(ws, `(() => {
+    const gridElement = document.querySelector('.v-ag-grid');
+    const gridApi = gridElement?.__vue__?.gridApi;
+    if (gridApi?.forEachNode) {
+      const tasks = [];
+      gridApi.forEachNode(node => {
+        const data = node.data;
+        if (!data || data.id == null) return;
+        const statusName = String(data.statusName || '');
+        const hasDownload = data.download === true || data.download === 1 || data.download === '1';
+        const statusAllowsDownload = /待下载|可下载|完成/.test(statusName) && !/已下载|失败|生成中|处理中|等待中|排队中/.test(statusName);
+        tasks.push({
+          id: String(data.id),
+          rowIndex: node.rowIndex == null ? '' : String(node.rowIndex),
+          text: [data.taskName, data.updateTime, data.createrName, statusName].filter(Boolean).map(String).join(' '),
+          buttonText: '下载',
+          buttonVisible: hasDownload && statusAllowsDownload,
+        });
       });
-      return 'ok';
-    })()`);
-
-    const tasks = await cdpEval(ws, `(() =>
-      [...document.querySelectorAll('.ag-row')].map(row => ({
-        rowIndex: row.getAttribute('row-index'),
-        text: row.innerText || '',
-      }))
-    )()`);
-    const task = Array.isArray(tasks) && tasks.find(candidate =>
-      isExpectedExportTask(candidate, { kind: 'shop', targetDate, after: exportRequestedAt })
-    );
-    result = task ? await cdpEval(ws, `(() => {
-      const row = [...document.querySelectorAll('.ag-row')]
-        .find(item => item.getAttribute('row-index') === ${JSON.stringify(task.rowIndex)});
-      const btn = [...(row?.querySelectorAll('button') || [])]
-        .find(item => (item.innerText || '').trim() === '下载' && item.offsetParent !== null);
-      if (!btn) return 'no matching download task button';
-      btn.click();
-      return 'ok';
-    })()`) : 'no matching download task';
-    
-    if (result === 'ok') {
-      console.log(`  ✅ 下载中心: 找到下载按钮并点击`);
-      break;
+      if (tasks.length) return tasks;
     }
-    
-    // 每 3 次刷新一下
-    if (attempt > 0 && attempt % 3 === 0) {
+
+    const roots = ['.ag-center-cols-container', '.ag-pinned-left-cols-container', '.ag-pinned-right-cols-container'];
+    const rows = new Map();
+    const getImmutableTaskId = row => row.getAttribute('data-task-id') || row.getAttribute('task-id') || '';
+    for (const rootSelector of roots) {
+      for (const row of document.querySelectorAll(rootSelector + ' .ag-row')) {
+        const rowIndex = row.getAttribute('row-index') || '';
+        const id = getImmutableTaskId(row);
+        const logicalKey = id || rowIndex;
+        if (!logicalKey) continue;
+        const current = rows.get(logicalKey) || { id, rowIndex, textParts: [], buttonText: '', buttonVisible: false };
+        const text = (row.innerText || '').trim();
+        if (text) current.textParts.push(text);
+        const operation = row.querySelector('[col-id="operation"]') || [...row.querySelectorAll('.ag-cell')].find(cell => cell.getAttribute('col-id') === 'operation');
+        const button = operation?.querySelector('button, .el-button, [role=button]');
+        if (button) {
+          current.buttonText = (button.innerText || button.textContent || '').trim();
+          current.buttonVisible = button.offsetParent !== null && !button.disabled;
+        }
+        rows.set(logicalKey, current);
+      }
+    }
+    return [...rows.values()].map(row => ({ ...row, text: [...new Set(row.textParts)].join(' ') }));
+  })()`);
+}
+
+async function queryDownloadCenter(ws) {
+  await dismissPassiveUi(ws);
+  const result = await cdpEval(ws, `(() => {
+    const button = [...document.querySelectorAll('button, .el-button')]
+      .find(item => (item.innerText || '').trim() === '查询' && item.offsetParent !== null && !item.disabled);
+    if (!button) return { ok: false, reason: 'download center query button not found' };
+    button.click();
+    return { ok: true };
+  })()`);
+  if (!result?.ok) throw new Error(result?.reason || 'download center query failed');
+  await sleep(4000);
+}
+
+async function collectDownloadCenterBaseline(ws) {
+  await cdpEval(ws, `location.href = "${DOWNLOAD_CENTER_URL}"`);
+  await sleep(4000);
+  await queryDownloadCenter(ws);
+  return (await collectDownloadCenterTasks(ws)).map(task => normalizeExportTask(task).key);
+}
+
+/** 去下载中心,等本次新任务出现再下载 */
+async function downloadFromCenter(ws, criteria) {
+  await cdpEval(ws, `location.href = "${DOWNLOAD_CENTER_URL}"`);
+  await sleep(4000);
+  await queryDownloadCenter(ws);
+  const maxAttempts = 20;
+  let lastDecision = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const tasks = await collectDownloadCenterTasks(ws);
+    const taskDecision = pickExportTask(tasks, criteria);
+    const poll = decideExportPoll({ attempt, maxAttempts, refreshEvery: 3, taskDecision });
+    lastDecision = poll;
+    if (poll.action === 'click') {
+      const selected = taskDecision.selected;
+      const clicked = await cdpEval(ws, `(async () => {
+        const selectedTaskId = ${JSON.stringify(selected.id)};
+        const roots = ['.ag-center-cols-container', '.ag-pinned-left-cols-container', '.ag-pinned-right-cols-container'];
+        const gridApi = document.querySelector('.v-ag-grid')?.__vue__?.gridApi;
+        if (!selectedTaskId || !gridApi?.forEachNode) return { ok: false, reason: 'selected task row unavailable' };
+        let selectedRowIndex = null;
+        gridApi.forEachNode(node => {
+          if (String(node.data?.id ?? '') === selectedTaskId && node.rowIndex != null) selectedRowIndex = node.rowIndex;
+        });
+        if (selectedRowIndex == null) return { ok: false, reason: 'selected task row unavailable' };
+        gridApi.ensureIndexVisible(selectedRowIndex, 'middle');
+        if (gridApi.ensureColumnVisible) gridApi.ensureColumnVisible('operation');
+        else gridApi.columnApi?.ensureColumnVisible?.('operation');
+        const rowIndexText = String(selectedRowIndex);
+        for (let clickAttempt = 0; clickAttempt < 6; clickAttempt++) {
+          await new Promise(resolve => setTimeout(resolve, 150));
+          for (const rootSelector of roots) {
+            const row = [...document.querySelectorAll(rootSelector + ' .ag-row')]
+              .find(item => item.getAttribute('row-index') === rowIndexText);
+            const operation = row?.querySelector('[col-id="operation"]');
+            const button = operation?.querySelector('button, .el-button, [role=button]');
+            if (button && (button.innerText || '').trim().replace(/\\s/g, '') === '下载' && button.offsetParent !== null && !button.disabled) {
+              button.click();
+              return { ok: true };
+            }
+          }
+        }
+        return { ok: false, reason: 'selected task download button disappeared' };
+      })()`);
+      if (!clicked?.ok) return { ok: false, reason: clicked?.reason || 'download click failed', candidates: poll.candidates };
+      console.log(`  ✅ 下载中心: 点击任务 ${poll.taskKey}`);
+      return { ok: true, taskKey: poll.taskKey };
+    }
+    if (poll.action === 'fail') return { ok: false, reason: poll.reason, candidates: poll.candidates };
+    if (poll.action === 'reload') {
       await cdpEval(ws, 'location.reload()');
       await sleep(4000);
-      // 刷新后再关通知+查询
-      await cdpEval(ws, `(() => { [...document.querySelectorAll('button')].forEach(b => { if ((b.innerText||'').includes('我知道了')) b.click(); }); return 'ok'; })()`);
-      await sleep(500);
-      await cdpEval(ws, `(() => { const btn = [...document.querySelectorAll('button')].find(b => (b.innerText||'').trim() === '查询'); if (btn) btn.click(); return 'ok'; })()`);
-      await sleep(5000);
+      await queryDownloadCenter(ws);
+    } else {
+      await sleep(1500);
     }
-    
-    await sleep(1500);
   }
-
-  if (result !== 'ok') {
-    console.log(`  ⚠ 下载中心: 未找到下载按钮`);
-  }
-
-  return { beforeMtime, result };
+  return { ok: false, reason: lastDecision?.reason || 'task_timeout', candidates: lastDecision?.candidates || [] };
 }
 
-/** 等待新的 xlsx 下载完成（检测 Downloads 目录中新出现的 .xlsx 文件） */
-async function waitForNewXlsx(beforeMtime, timeout = 60000) {
+/** 等待新的 xlsx 下载完成并通过目标日期/报表类型校验 */
+async function waitForNewXlsx(beforeFiles, { targetDate, validator, timeout = 60000 } = {}) {
+  const validate = validator || (xlsxPath => {
+    const rawRows = parseXlsxRaw(xlsxPath);
+    const validation = validateExportRows(rawRows, { kind: 'shop', targetDate });
+    if (!validation.ok) throw new Error(validation.reason);
+    return rawRows;
+  });
   const start = Date.now();
+  const observations = new Map();
   while (Date.now() - start < timeout) {
     await sleep(2000);
-    const files = readdirSync(DOWNLOAD_DIR).filter(f =>
-      f.endsWith('.xlsx') && !f.endsWith('.crdownload')
-    );
+    const files = readdirSync(DOWNLOAD_DIR).filter(f => f.endsWith('.xlsx') && !f.endsWith('.crdownload'));
     for (const f of files) {
       const fullPath = path.join(DOWNLOAD_DIR, f);
       const stat = statSync(fullPath);
-      if (stat.mtimeMs > beforeMtime && stat.size > 5000) {
-        // 等文件大小稳定（下载完成）
-        let lastSize = 0;
-        for (let i = 0; i < 10; i++) {
-          const size = statSync(fullPath).size;
-          if (size === lastSize && size > 5000) return fullPath;
-          lastSize = size;
-          await sleep(1000);
-        }
-        return fullPath;
+      const before = beforeFiles.get(f);
+      if (stat.size <= 5000 || (before && stat.mtimeMs <= before.mtimeMs && stat.size === before.size)) continue;
+      const signature = `${stat.size}:${stat.mtimeMs}`;
+      const previous = observations.get(f);
+      const stableCount = previous?.size === stat.size ? previous.stableCount + 1 : 0;
+      const observation = { size: stat.size, stableCount, invalidSignature: previous?.invalidSignature || '' };
+      observations.set(f, observation);
+      if (stableCount < 2 || observation.invalidSignature === signature) continue;
+      try {
+        return { path: fullPath, value: validate(fullPath) };
+      } catch {
+        observation.invalidSignature = signature;
       }
     }
   }
@@ -592,6 +680,7 @@ async function main() {
 
   const allRecords = [];
   const failedDates = result.failedDates;
+  const consumedTaskKeys = new Set();
 
   for (let i = 0; i < dateList.length; i++) {
     const targetDate = dateList[i];
@@ -601,7 +690,7 @@ async function main() {
       // 1. 导航到多维利润分析页
       await cdpEval(ws, `location.href = "${TARGET_URL}"`);
       await sleep(5000);
-      await closePopups(ws);
+      await dismissPassiveUi(ws);
 
       // 2. 切换到"更多店铺展示"Tab
       await switchToShopTab(ws);
@@ -613,7 +702,7 @@ async function main() {
           console.log(`  🔄 日期切换重试 ${retry + 1}/3 (重载页面)`);
           await cdpEval(ws, `location.href = "${TARGET_URL}"`);
           await sleep(5000);
-          await closePopups(ws);
+          await dismissPassiveUi(ws);
           await switchToShopTab(ws);
         }
         const dateResult = await setDateRangeByPanel(ws, targetDate);
@@ -635,48 +724,54 @@ async function main() {
       // 5. 点查询
       await clickQuery(ws);
 
-      // 6. 点导出 -> 处理弹窗
-      const exportRequestedAt = Date.now();
-      await clickExport(ws);
+      // 6. 提交导出前记录下载中心已有任务,避免复用旧任务。
+      const baselineTaskKeys = await collectDownloadCenterBaseline(ws);
+      await cdpEval(ws, `location.href = "${TARGET_URL}"`);
+      await sleep(5000);
+      await dismissPassiveUi(ws);
+      await switchToShopTab(ws);
+      await selectAllPddShops(ws);
+      const restoredDate = await setDateRangeByPanel(ws, targetDate);
+      if (restoredDate?.start !== targetDate || restoredDate?.end !== targetDate) throw new Error('date restore failed before export');
+      await clickQuery(ws);
 
-      // 7. 去下载中心下载 xlsx
-      const download = await downloadFromCenter(ws, targetDate, exportRequestedAt);
-      if (download.result !== 'ok') {
-        console.log(`  ⚠️ 下载中心没有匹配任务,跳过`);
-        markCollectorFailure(result, targetDate, 'matching download task not found');
+      // 7. 点导出 -> 处理弹窗,使用 clickExport 返回的实际提交时间。
+      const exportRequestedAt = await clickExport(ws);
+
+      // 8. 去下载中心下载 xlsx
+      const beforeFiles = snapshotDownloadFiles();
+      const download = await downloadFromCenter(ws, {
+        kind: 'shop',
+        requestedAt: exportRequestedAt,
+        baselineTaskKeys,
+        consumedTaskKeys: [...consumedTaskKeys],
+        clockSkewMs: 1000,
+      });
+      if (!download.ok) {
+        console.log(`  ⚠️ 下载中心失败: ${download.reason} ${JSON.stringify(download.candidates || [])}`);
+        markCollectorFailure(result, targetDate, `download center ${download.reason}`);
         continue;
       }
+      consumedTaskKeys.add(download.taskKey);
 
-      // 8. 等下载完成
-      const xlsxPath = await waitForNewXlsx(download.beforeMtime, 60000);
-      if (!xlsxPath) {
+      // 9. 等下载完成
+      const downloadedXlsx = await waitForNewXlsx(beforeFiles, { targetDate, timeout: 60000 });
+      if (!downloadedXlsx) {
         console.log(`  ⚠️ 下载超时,跳过`);
         markCollectorFailure(result, targetDate, 'download timeout');
         continue;
       }
+      const xlsxPath = downloadedXlsx.path;
+      const rawRows = downloadedXlsx.value;
       console.log(`  📄 下载完成: ${path.basename(xlsxPath)}`);
 
-      // 9. 解析 xlsx
-      const rawRows = parseXlsxRaw(xlsxPath);
-
-      const validation = validateExportRows(rawRows, { kind: 'shop', targetDate });
-      if (!validation.ok) {
-        console.log(`  ⚠️ xlsx 校验失败: ${validation.reason},跳过`);
-        markCollectorFailure(result, targetDate, validation.reason);
-        continue;
-      }
-
-      // 9.1 验证 xlsx 里的时间范围是否跟目标日期一致
-      const titleStr = String(rawRows[0]?.[0] || '');
-      const xlsxDateMatch = titleStr.match(/时间范围[：:]\s*(\d{4}-\d{2}-\d{2})/);
-      const xlsxDate = xlsxDateMatch ? xlsxDateMatch[1] : '';
-      if (xlsxDate && xlsxDate !== targetDate) {
-        console.log(`  ⚠️ xlsx 时间范围是 ${xlsxDate}, 不是 ${targetDate}, 日期切换失败,跳过`);
-        markCollectorFailure(result, targetDate, 'export date mismatch');
-        continue;
-      }
-
+      // 9. xlsx 已在等待阶段完成解析和校验
       const records = parseShopExportRows(rawRows, targetDate);
+      if (records.length === 0) {
+        console.log(`  ⚠️ xlsx 没有有效店铺记录,跳过`);
+        markCollectorFailure(result, targetDate, 'no valid shop records');
+        continue;
+      }
       const profitCount = records.filter(r => r.netProfit != null).length;
       console.log(`  ✅ ${records.length} 家店铺 (netProfit 有值: ${profitCount})`);
 
@@ -711,15 +806,19 @@ async function main() {
   ws.close();
 
   // 汇总落盘
-  const summaryFile = path.join(OUTPUT_DIR, 'huice-shop-latest.json');
-  writeFileSync(summaryFile, JSON.stringify(allRecords, null, 2));
-  console.log(`\n💾 数据落盘: ${summaryFile} (${allRecords.length} 条)`);
+  if (allRecords.length > 0 && failedDates.length === 0 && !result.fatalError) {
+    const summaryFile = path.join(OUTPUT_DIR, 'huice-shop-latest.json');
+    writeFileSync(summaryFile, JSON.stringify(allRecords, null, 2));
+    console.log(`\n💾 数据落盘: ${summaryFile} (${allRecords.length} 条)`);
+  } else {
+    console.log(`\n⚠️ 本次运行不完整或无数据,保留现有 huice-shop-latest.json`);
+  }
   console.log(`✅ 回采完成`);
 
   // 失败日期汇总
   if (failedDates.length > 0) {
     const failLog = path.join(OUTPUT_DIR, 'failed-dates.json');
-    writeFileSync(failLog, JSON.stringify({ dates: failedDates, ts: new Date().toISOString() }, null, 2));
+    writeFileSync(failLog, JSON.stringify({ dates: failedDates, failures: result.failures, ts: new Date().toISOString() }, null, 2));
     console.log(`⚠️ ${failedDates.length} 天采集失败,已记录到 ${failLog}`);
     console.log(`   失败日期: ${failedDates.join(', ')}`);
     console.log(`   补采命令: node tools/huice-shop-export-cdp.mjs --dates ${failedDates.join(',')}`);

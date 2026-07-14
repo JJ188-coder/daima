@@ -14,7 +14,9 @@ test('returns zero only when no date and no fatal error failed', () => {
   assert.equal(collectorExitCode({ failedDates: [], fatalError: new Error('offline') }), 1);
 });
 
-test('requires both promotion spend and ROI for a complete promotion day', () => {
+test('requires ROI only when promotion spend is positive', () => {
   assert.equal(hasCompletePromoMetrics({ promoSpend: 12, roi: 3.5 }), true);
   assert.equal(hasCompletePromoMetrics({ promoSpend: 12, roi: null }), false);
+  assert.equal(hasCompletePromoMetrics({ promoSpend: 0, roi: null }), true);
+  assert.equal(hasCompletePromoMetrics({ promoSpend: null, roi: null }), false);
 });

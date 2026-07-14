@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   buildStoreReportDay,
+  summarizeStoreReportDays,
   parseShopExportRows,
   normalizeShopExportRow,
   fillDateRange,
@@ -20,17 +21,18 @@ test('subtracts promo spend from Huice net profit (Huice export has promo=0)', (
     },
   });
 
+  assert.equal(row.netProfitBeforePromo, 125);
   // 净利润 = 慧经营净利润 125 - 推广费 100 = 25
   assert.equal(row.netProfit, 25);
   // 净利率 = 25 / 1000 = 0.025
   assert.equal(row.netProfitRate, 0.025);
-  // 保本ROI = 1 / 0.025 = 40
-  assert.equal(row.breakEvenRoi, 40);
+  // 保本ROI = 销售额 1000 / 扣推广前利润 125 = 8
+  assert.equal(row.breakEvenRoi, 8);
   assert.equal(row.promoFeeRatio, 0.1);
   assert.equal(row.roi, 10);
 });
 
-test('keeps Huice net profit when promo spend is null', () => {
+test('keeps adjusted net profit unknown when promo spend is null', () => {
   const row = buildStoreReportDay({
     date: '2026-07-09',
     shop: {
@@ -40,9 +42,25 @@ test('keeps Huice net profit when promo spend is null', () => {
     },
   });
 
-  // 没有推广费数据时不扣减
+  assert.equal(row.netProfitBeforePromo, 125);
+  assert.equal(row.netProfit, null);
+  assert.equal(row.netProfitRate, null);
+  assert.equal(row.breakEvenRoi, 8);
+  assert.equal(row.promoFeeRatio, null);
+  assert.equal(row.promoDataPresent, false);
+});
+
+test('treats zero promo spend as known data', () => {
+  const row = buildStoreReportDay({
+    date: '2026-07-09',
+    shop: { salesAmount: 1000, promoSpend: 0, netProfit: 125 },
+  });
+
+  assert.equal(row.promoDataPresent, true);
   assert.equal(row.netProfit, 125);
-  assert.equal(row.netProfitRate, 0.125);
+  assert.equal(row.promoFeeRatio, 0);
+  assert.equal(row.roi, null);
+  assert.equal(row.breakEvenRoi, 8);
 });
 
 test('marks the whole store day as loss when net profit after promo is negative', () => {
@@ -56,6 +74,72 @@ test('marks the whole store day as loss when net profit after promo is negative'
   assert.equal(row.netProfitRate, -0.101);
   assert.equal(row.breakEvenRoi, null);
   assert.equal(row.isLoss, true);
+});
+
+test('summarizes zero promo spend without treating it as missing', () => {
+  const summary = summarizeStoreReportDays([
+    buildStoreReportDay({ date: '2026-07-08', shop: { salesAmount: 500, promoSpend: 0, netProfit: 50 } }),
+    buildStoreReportDay({ date: '2026-07-09', shop: { salesAmount: 500, promoSpend: 0, netProfit: 50 } }),
+  ]);
+
+  assert.equal(summary.promoComplete, true);
+  assert.equal(summary.promoKnownDays, 2);
+  assert.equal(summary.promoMissingDays, 0);
+  assert.equal(summary.promoSpend, 0);
+  assert.equal(summary.promoFeeRatio, 0);
+  assert.equal(summary.roi, null);
+  assert.equal(summary.netProfit, 100);
+  assert.equal(summary.breakEvenRoi, 10);
+});
+
+test('keeps all promo-dependent summary metrics null when promo data is missing', () => {
+  const summary = summarizeStoreReportDays([
+    buildStoreReportDay({ date: '2026-07-08', shop: { salesAmount: 500, promoSpend: null, netProfit: 50 } }),
+    buildStoreReportDay({ date: '2026-07-09', shop: { salesAmount: 500, promoSpend: null, netProfit: 50 } }),
+  ]);
+
+  assert.equal(summary.promoComplete, false);
+  assert.equal(summary.promoKnownDays, 0);
+  assert.equal(summary.promoMissingDays, 2);
+  assert.equal(summary.promoSpend, null);
+  assert.equal(summary.promoFeeRatio, null);
+  assert.equal(summary.roi, null);
+  assert.equal(summary.netProfit, null);
+  assert.equal(summary.netProfitRate, null);
+  assert.equal(summary.breakEvenRoi, 10);
+});
+
+test('does not present partial promo data as a complete period summary', () => {
+  const summary = summarizeStoreReportDays([
+    buildStoreReportDay({ date: '2026-07-08', shop: { salesAmount: 500, promoSpend: 20, netProfit: 50 } }),
+    buildStoreReportDay({ date: '2026-07-09', shop: { salesAmount: 500, promoSpend: null, netProfit: 50 } }),
+  ]);
+
+  assert.equal(summary.promoComplete, false);
+  assert.equal(summary.promoKnownDays, 1);
+  assert.equal(summary.promoMissingDays, 1);
+  assert.equal(summary.promoSpend, null);
+  assert.equal(summary.promoFeeRatio, null);
+  assert.equal(summary.roi, null);
+  assert.equal(summary.netProfit, null);
+  assert.equal(summary.netProfitRate, null);
+  assert.equal(summary.breakEvenRoi, 10);
+});
+
+test('returns null ratios when sales or pre-promo profit cannot form a ratio', () => {
+  const zeroSales = buildStoreReportDay({
+    date: '2026-07-09',
+    shop: { salesAmount: 0, promoSpend: 10, netProfit: 20 },
+  });
+  const lossBeforePromo = buildStoreReportDay({
+    date: '2026-07-09',
+    shop: { salesAmount: 1000, promoSpend: 10, netProfit: -1 },
+  });
+
+  assert.equal(zeroSales.netProfitRate, null);
+  assert.equal(zeroSales.promoFeeRatio, null);
+  assert.equal(zeroSales.breakEvenRoi, null);
+  assert.equal(lossBeforePromo.breakEvenRoi, null);
 });
 
 test('parses Huice shop export rows by real header names and skips total rows', () => {

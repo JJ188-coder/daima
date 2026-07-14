@@ -11,6 +11,12 @@ export function resolveAllowedOrigin(origin) {
   return null;
 }
 
+export function isAllowedMutationRequest(origin, contentType) {
+  return resolveAllowedOrigin(origin) !== null
+    && typeof contentType === 'string'
+    && contentType.toLowerCase().startsWith('application/json');
+}
+
 export function buildCorsHeaders(origin) {
   const allowedOrigin = resolveAllowedOrigin(origin);
   if (!allowedOrigin) return {};

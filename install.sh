@@ -184,33 +184,15 @@ exit 1
 EOF
 chmod +x "$LOCAL_BIN/daima-cdp-chrome.sh"
 
-# huice-server wrapper
+# huice-server wrapper (exec 后由 launchd 直接托管 Node 进程)
 cat > "$LOCAL_BIN/daima-huice-server.sh" << EOF
 #!/bin/bash
 NODE_BIN="$NODE_BIN"
 PROJECT_DIR="$SCRIPT_DIR"
 
-if lsof -nP -iTCP:9911 -sTCP:LISTEN > /dev/null 2>&1; then
-  echo "[huice-server] 9911 端口已在线,跳过"
-  exit 0
-fi
-
-nohup "\$NODE_BIN" "\$PROJECT_DIR/tools/huice-server.mjs" \\
-  > /tmp/huice-server.log 2>&1 &
-
-echo "[huice-server] PID: \$!"
-
-for i in \$(seq 1 5); do
-  sleep 1
-  if lsof -nP -iTCP:9911 -sTCP:LISTEN > /dev/null 2>&1; then
-    echo "[huice-server] ✅ 9911 已上线"
-    exit 0
-  fi
-done
-
-echo "[huice-server] ❌ 9911 启动超时"
-exit 1
+exec "\$NODE_BIN" "\$PROJECT_DIR/tools/huice-server.mjs"
 EOF
+
 chmod +x "$LOCAL_BIN/daima-huice-server.sh"
 
 # huice-daily wrapper (逻辑内联,用 node 替代 curl+python3,去掉 set -e)
@@ -243,34 +225,56 @@ req.on("error", () => console.log("no_cdp"));
 req.on("timeout", () => { req.destroy(); console.log("timeout"); });
 ' 2>/dev/null) || HJY_CHECK="error"
 
-if [ "$HJY_CHECK" = "no_cdp" ] || [ "$HJY_CHECK" = "timeout" ] || [ "$HJY_CHECK" = "error" ]; then
-  echo "$LOG_PREFIX ❌ CDP Chrome 9222 不在线 ($HJY_CHECK)"
-  exit 1
-fi
-echo "$LOG_PREFIX ✅ CDP Chrome 在线"
+case "$HJY_CHECK" in
+  ok)
+    echo "$LOG_PREFIX ✅ CDP Chrome 在线"
+    echo "$LOG_PREFIX ✅ 慧经营标签页存在"
+    ;;
+  no_hjy)
+    echo "$LOG_PREFIX ❌ 没找到 hjy.huice.com 标签页"
+    exit 1
+    ;;
+  *)
+    echo "$LOG_PREFIX ❌ CDP Chrome 检查失败 (${HJY_CHECK:-empty})"
+    exit 1
+    ;;
+esac
 
-if [ "$HJY_CHECK" = "no_hjy" ]; then
-  echo "$LOG_PREFIX ❌ 没找到 hjy.huice.com 标签页"
-  exit 1
-fi
-echo "$LOG_PREFIX ✅ 慧经营标签页存在"
+STATUS=0
 
 # 采前一天商品数据
 echo "$LOG_PREFIX 📅 采集前一天数据..."
-"$NODE_BIN" tools/huice-export-cdp.mjs --days 1 || echo "$LOG_PREFIX ⚠️ 商品采集失败"
+"$NODE_BIN" tools/huice-export-cdp.mjs --days 1 || {
+  echo "$LOG_PREFIX ⚠️ 商品采集失败"
+  STATUS=1
+}
 
 # 写入 dts storage
 echo "$LOG_PREFIX 📤 写入 dts storage..."
-"$NODE_BIN" tools/write-storage.mjs --days 1 || echo "$LOG_PREFIX ⚠️ 写入 storage 失败"
+"$NODE_BIN" tools/write-storage.mjs --days 1 || {
+  echo "$LOG_PREFIX ⚠️ 写入 storage 失败"
+  STATUS=1
+}
 
 # 店铺维度日报
 YESTERDAY=$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d "yesterday" +%Y-%m-%d)
 echo "$LOG_PREFIX 🏪 采集店铺日报 $YESTERDAY ..."
-"$NODE_BIN" "$PROJECT_DIR/tools/huice-shop-export-cdp.mjs" --dates "$YESTERDAY" || echo "$LOG_PREFIX ⚠️ 店铺日报失败"
+"$NODE_BIN" "$PROJECT_DIR/tools/huice-shop-export-cdp.mjs" --dates "$YESTERDAY" || {
+  echo "$LOG_PREFIX ⚠️ 店铺日报失败"
+  STATUS=1
+}
 
 # 拼多多推广费
 echo "$LOG_PREFIX 📣 采集拼多多推广费 $YESTERDAY ..."
-"$NODE_BIN" "$PROJECT_DIR/tools/pdd-promo-cdp.mjs" --dates "$YESTERDAY" || echo "$LOG_PREFIX ⚠️ 推广费采集失败"
+"$NODE_BIN" "$PROJECT_DIR/tools/pdd-promo-cdp.mjs" --dates "$YESTERDAY" || {
+  echo "$LOG_PREFIX ⚠️ 推广费采集失败"
+  STATUS=1
+}
+
+if [ "$STATUS" -ne 0 ]; then
+  echo "$LOG_PREFIX ❌ 每日同步完成，但存在失败步骤"
+  exit "$STATUS"
+fi
 
 echo "$LOG_PREFIX ✅ 每日同步完成"
 DAILY_EOF
@@ -386,13 +390,13 @@ cat > "$SERVER_PLIST" << EOF
 </plist>
 EOF
 
-# 卸载旧的(如果有)再加载
-launchctl unload "$CDP_PLIST" 2>/dev/null || true
-launchctl unload "$DAILY_PLIST" 2>/dev/null || true
-launchctl unload "$SERVER_PLIST" 2>/dev/null || true
-launchctl load -w "$CDP_PLIST"
-launchctl load -w "$DAILY_PLIST"
-launchctl load -w "$SERVER_PLIST"
+# 校验后逐个重载,避免某个任务加载失败时把其他服务留在停机状态
+plutil -lint "$CDP_PLIST" "$DAILY_PLIST" "$SERVER_PLIST" > /dev/null
+LAUNCH_DOMAIN="gui/$(id -u)"
+for PLIST in "$SERVER_PLIST" "$DAILY_PLIST" "$CDP_PLIST"; do
+  launchctl bootout "$LAUNCH_DOMAIN" "$PLIST" 2>/dev/null || true
+  launchctl bootstrap "$LAUNCH_DOMAIN" "$PLIST"
+done
 
 echo -e "  ${GREEN}✅ LaunchAgent 已加载:${NC}"
 echo -e "     - com.daima.cdp-chrome  (开机自启动 Chrome)"
@@ -400,9 +404,15 @@ echo -e "     - com.daima.huice-daily (每天 09:00 采集)"
 echo -e "     - com.daima.huice-server(开机启动 HTTP 数据服务)"
 echo ""
 
-# === 6. 启动 HTTP 服务 + CDP Chrome ===
-echo -e "${YELLOW}[6/6] 启动 HTTP 服务 + CDP Chrome...${NC}"
-bash "$LOCAL_BIN/daima-huice-server.sh" 2>/dev/null || true
+# === 6. 检查 HTTP 服务 + CDP Chrome ===
+echo -e "${YELLOW}[6/6] 检查 HTTP 服务 + CDP Chrome...${NC}"
+for i in $(seq 1 10); do
+  if curl -s --max-time 2 http://127.0.0.1:9911/health > /dev/null 2>&1; then
+    echo -e "  ${GREEN}✅ HTTP 数据服务已上线${NC}"
+    break
+  fi
+  sleep 1
+done
 bash "$LOCAL_BIN/daima-cdp-chrome.sh" 2>/dev/null || true
 echo ""
 

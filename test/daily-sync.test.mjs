@@ -15,4 +15,7 @@ test('daily sync runs both shop and PDD promotion collectors on macOS and Window
     assert.match(source, /pdd-promo-cdp\.mjs/);
   }
   assert.doesNotMatch(shell, /失败不影响商品同步/);
+  assert.doesNotMatch(shell, /set -e/);
+  assert.match(shell, /STATUS=0/);
+  assert.match(shell, /存在失败步骤/);
 });
