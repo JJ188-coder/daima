@@ -212,11 +212,11 @@ async function setDateRangeByPanel(ws, targetDate) {
   const [year, month, day] = targetDate.split('-').map(Number);
   const targetHeader = `${year} 年 ${month} 月`;
 
-  // 0. 先关闭旧面板(可能有残留)
+  // 0. 打开前点击页面空白，收起可能残留的日期面板。
   await cdpEval(ws, `document.body.click()`);
   await sleep(300);
 
-  // 1. 打开日期面板
+  // 1. 打开日期面板。
   await cdpEval(ws, `(() => {
     const editor = document.querySelector('.el-range-editor');
     if (editor) editor.click();
@@ -224,27 +224,28 @@ async function setDateRangeByPanel(ws, targetDate) {
   })()`);
   await sleep(1500);
 
-  // 2. 翻月到目标月（最多翻 12 次）
-  // 注意: 页面可能有多个残留面板,用 querySelectorAll 取所有
+  // 2. 翻月到目标月（最多翻 12 次），每次都重新查询可见 DOM。
   for (let attempt = 0; attempt < 12; attempt++) {
     const found = await cdpEval(ws, `(() => {
-      const panels = document.querySelectorAll('.el-date-range-picker__content');
-      for (const p of panels) {
+      const panels = [...document.querySelectorAll('.el-date-range-picker__content')];
+      const matches = panels.filter(p => {
+        const rect = p.getBoundingClientRect();
         const h = p.querySelector('.el-date-range-picker__header')?.textContent?.trim() || '';
-        if (h === '${targetHeader}') return 'found';
-      }
-      return 'not found';
+        return p.offsetParent !== null && rect.width > 0 && rect.height > 0 && h === '${targetHeader}';
+      });
+      return matches.length ? 'found' : 'not found';
     })()`);
     if (found === 'found') break;
 
-    // 往前翻一个月:点第一个面板的单箭头
     await cdpEval(ws, `(() => {
-      const panels = document.querySelectorAll('.el-date-range-picker__content');
+      const panels = [...document.querySelectorAll('.el-date-range-picker__content')].filter(p => {
+        const rect = p.getBoundingClientRect();
+        return p.offsetParent !== null && rect.width > 0 && rect.height > 0;
+      });
       const first = panels[0];
       if (!first) return 'no panel';
       const btn = first.querySelector('.el-icon-arrow-left');
       if (btn) { (btn.closest('button') || btn).click(); return 'prev'; }
-      // 也可能需要往后翻
       const btnRight = first.querySelector('.el-icon-arrow-right');
       if (btnRight) { (btnRight.closest('button') || btnRight).click(); return 'next'; }
       return 'no arrow';
@@ -252,56 +253,47 @@ async function setDateRangeByPanel(ws, targetDate) {
     await sleep(800);
   }
 
-  // 3. 点目标日期两次(用最后一个匹配的面板,避免残留面板干扰)
+  // 3. 第一次点击目标日期；只在最后一个可见的目标月面板内查找同一天。
   await cdpEval(ws, `(() => {
     const panels = [...document.querySelectorAll('.el-date-range-picker__content')];
-    // 取最后一个匹配目标月的面板(最新的)
-    let targetPanel = null;
-    for (const p of panels) {
+    const matches = panels.filter(p => {
+      const rect = p.getBoundingClientRect();
       const h = p.querySelector('.el-date-range-picker__header')?.textContent?.trim() || '';
-      if (h === '${targetHeader}') targetPanel = p;
-    }
+      return p.offsetParent !== null && rect.width > 0 && rect.height > 0 && h === '${targetHeader}';
+    });
+    const targetPanel = matches[matches.length - 1];
     if (!targetPanel) return 'no target panel';
-    // 直接找目标日期,不管状态(start-date/end-date/in-range 都不管)
-    let dayCell = [...targetPanel.querySelectorAll('td.available')].find(td =>
-      td.textContent.trim() === '${day}'
-    );
+    let dayCell = [...targetPanel.querySelectorAll('td.available:not(.prev-month):not(.next-month)')].find(td => td.textContent.trim() === '${day}');
+    if (!dayCell) dayCell = [...targetPanel.querySelectorAll('td')].find(td => !td.classList.contains('prev-month') && !td.classList.contains('next-month') && td.textContent.trim() === '${day}');
     if (!dayCell) return 'no day ${day}';
-    dayCell.click();  // 第一次:设开始日期
+    dayCell.click();
     return 'first click';
   })()`);
   await sleep(1000);
 
-  // 4. 第二次点同一日期(设结束 = 开始 = 单日范围)
+  // 4. DOM 可能已刷新，重新查询同一规则的目标面板并再次点击目标日期。
   await cdpEval(ws, `(() => {
-    const panels = document.querySelectorAll('.el-date-range-picker__content');
-    let targetPanel = null;
-    for (const p of panels) {
+    const panels = [...document.querySelectorAll('.el-date-range-picker__content')];
+    const matches = panels.filter(p => {
+      const rect = p.getBoundingClientRect();
       const h = p.querySelector('.el-date-range-picker__header')?.textContent?.trim() || '';
-      if (h === '${targetHeader}') { targetPanel = p; break; }
-    }
+      return p.offsetParent !== null && rect.width > 0 && rect.height > 0 && h === '${targetHeader}';
+    });
+    const targetPanel = matches[matches.length - 1];
     if (!targetPanel) return 'no target panel';
-    // 重新找(可能 DOM 变了)
-    let dayCell = [...targetPanel.querySelectorAll('td.available')].find(td =>
-      td.textContent.trim() === '${day}'
-    );
-    if (!dayCell) {
-      // 也找 td 不带 available 的(选中后可能 class 变了)
-      dayCell = [...targetPanel.querySelectorAll('td')].find(td =>
-        td.textContent.trim() === '${day}'
-      );
-    }
-    if (!dayCell) return 'no day';
-    dayCell.click();  // 第二次:设结束日期
+    let dayCell = [...targetPanel.querySelectorAll('td.available:not(.prev-month):not(.next-month)')].find(td => td.textContent.trim() === '${day}');
+    if (!dayCell) dayCell = [...targetPanel.querySelectorAll('td')].find(td => !td.classList.contains('prev-month') && !td.classList.contains('next-month') && td.textContent.trim() === '${day}');
+    if (!dayCell) return 'no day ${day}';
+    dayCell.click();
     return 'second click';
   })()`);
   await sleep(800);
 
-  // 5. 关面板（点空白处）
+  // 5. 关面板（点空白处）。
   await cdpEval(ws, `document.body.click()`);
   await sleep(500);
 
-  // 6. 验证日期是否切成功
+  // 6. 最终以输入框实际值验证日期是否切成功。
   const dateVals = await cdpEval(ws, `(() => {
     const inputs = [...document.querySelectorAll('input')];
     return {
@@ -630,9 +622,14 @@ async function waitForNewXlsx(beforeFiles, { targetDate, validator, timeout = 60
 function parseXlsxRaw(xlsxPath) {
   const script = [
     'import openpyxl, json, sys',
+    'import warnings',
+    'warnings.filterwarnings(\'ignore\', message=r"^Workbook contains no default style, apply openpyxl\'s default$", category=UserWarning)',
     'wb = openpyxl.load_workbook(sys.argv[1])',
-    'ws = wb.active',
-    'rows = list(ws.iter_rows(values_only=True))',
+    'try:',
+    '    ws = wb.active',
+    '    rows = list(ws.iter_rows(values_only=True))',
+    'finally:',
+    '    wb.close()',
     'result = []',
     'for row in rows:',
     '    result.append([str(c) if c is not None else "" for c in row])',

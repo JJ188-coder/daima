@@ -9,6 +9,16 @@ async function sources() {
   return Promise.all([readFile(productUrl, 'utf8'), readFile(shopUrl, 'utf8')]);
 }
 
+function withoutJsComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+}
+
+function countMatches(source, pattern) {
+  return [...source.matchAll(pattern)].length;
+}
+
 test('both exporters use the shared task picker and poll decision with a pre-submit baseline', async () => {
   const [product, shop] = await sources();
   for (const source of [product, shop]) {
@@ -178,15 +188,58 @@ test('download-center query is optional and route readiness is checked before po
   }
 });
 
-test('product date picker never clears stale state by clicking an unrelated date', async () => {
-  const [product] = await sources();
-  const start = product.indexOf('async function setDateRangeByPanel');
-  const end = product.indexOf('\n/**', start + 1);
-  const picker = product.slice(start, end);
+test('both date pickers use the last visible exact-month panel and re-query it for each target-date click', async () => {
+  const [product, shop] = await sources();
+  for (const source of [product, shop]) {
+    const start = source.indexOf('async function setDateRangeByPanel');
+    const end = source.indexOf('\n/**', start + 1);
+    const picker = withoutJsComments(source.slice(start, end));
 
-  assert.doesNotMatch(picker, /otherCell/);
-  assert.doesNotMatch(picker, /classList\.contains\(['"](?:start-date|end-date|in-range)['"]\)/);
-  assert.match(picker, /targetPanel\.querySelectorAll\(['"]td['"]\)/);
+    const closeIndex = picker.indexOf('document.body.click()');
+    const openIndex = picker.indexOf("document.querySelector('.el-range-editor')");
+    assert.ok(closeIndex >= 0 && closeIndex < openIndex, 'stale panels must be closed before the editor opens');
+    assert.ok(countMatches(picker, /document\.querySelectorAll\(['"]\.el-date-range-picker__content['"]\)/g) >= 4,
+      'panel DOM must be queried again while navigating and before both clicks');
+    assert.match(picker, /offsetParent\s*!==\s*null/);
+    assert.match(picker, /getBoundingClientRect\(\)/);
+    assert.match(picker, /rect\.width\s*>\s*0\s*&&\s*rect\.height\s*>\s*0/);
+    assert.match(picker, /===\s*['"]\$\{targetHeader\}['"]/);
+    assert.equal(countMatches(picker, /matches\[matches\.length\s*-\s*1\]/g), 2,
+      'both clicks must select the last visible exact-month match');
+    assert.equal(countMatches(picker, /targetPanel\.querySelectorAll\(['"]td\.available:not\(\.prev-month\):not\(\.next-month\)['"]\)/g), 2,
+      'both preferred available lookups must exclude adjacent-month cells');
+    assert.doesNotMatch(picker, /targetPanel\.querySelectorAll\(['"]td\.available['"]\)/,
+      'unfiltered available lookups can select an adjacent-month duplicate day');
+    assert.equal(countMatches(picker, /targetPanel\.querySelectorAll\(['"]td['"]\)/g), 2,
+      'both clicks must fall back only to the same target date in the selected panel');
+    assert.equal(countMatches(picker, /\[\.\.\.targetPanel\.querySelectorAll\(['"]td['"]\)\]\.find\(td\s*=>\s*!td\.classList\.contains\(['"]prev-month['"]\)\s*&&\s*!td\.classList\.contains\(['"]next-month['"]\)\s*&&\s*td\.textContent\.trim\(\)\s*===\s*['"]\$\{day\}['"]\)/g), 2,
+      'both generic td fallbacks must exclude adjacent-month cells before matching the target day');
+    assert.doesNotMatch(picker, /otherCell/);
+    assert.match(picker, /placeholder === ['"]开始日期['"]/);
+    assert.match(picker, /placeholder === ['"]结束日期['"]/);
+  }
+});
+
+test('both embedded xlsx parsers suppress only the openpyxl default-style warning and always close materialized workbooks', async () => {
+  const [product, shop] = await sources();
+  const productStart = product.indexOf('function parseXlsx');
+  const productEnd = product.indexOf('\nfunction publishJsonAtomically', productStart);
+  const shopStart = shop.indexOf('function parseXlsxRaw');
+  const shopEnd = shop.indexOf('\n// ============ 主流程', shopStart);
+
+  for (const parserSource of [product.slice(productStart, productEnd), shop.slice(shopStart, shopEnd)]) {
+    const parser = withoutJsComments(parserSource).replace(/\\'/g, "'");
+    assert.match(parser, /import warnings/);
+    assert.match(parser, /warnings\.filterwarnings\(['"]ignore['"],\s*message\s*=\s*r["']\^Workbook contains no default style, apply openpyxl's default\$["'],\s*category\s*=\s*UserWarning\)/);
+    assert.match(parser, /wb\s*=\s*openpyxl\.load_workbook\([^\n]+\)/);
+    assert.doesNotMatch(parser, /read_only\s*=\s*True/);
+    assert.match(parser, /try:/);
+    assert.match(parser, /ws\s*=\s*wb\.active/);
+    assert.match(parser, /rows\s*=\s*list\(ws\.iter_rows\(values_only\s*=\s*True\)\)/);
+    assert.match(parser, /finally:/);
+    assert.match(parser, /wb\.close\(\)/);
+    assert.ok(parser.indexOf('rows = list(') < parser.indexOf('for row in rows'), 'business parsing must use materialized rows');
+  }
 });
 
 test('a stale failed-dates marker is deleted only by the fully successful branch', async () => {
