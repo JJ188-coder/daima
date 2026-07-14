@@ -237,8 +237,7 @@ function ensureProductProfitSchema(db) {
 }
 
 /** 插入或更新店铺 */
-export function upsertShop(huiceName) {
-  const db = getDb();
+function upsertShopWithDb(db, huiceName) {
   // 解析平台和店名
   const m = huiceName.match(/^(.+?)[【】\(\)（（]/);
   let platform = '';
@@ -265,6 +264,10 @@ export function upsertShop(huiceName) {
   // 返回 shop 对象
   const row = db.prepare('SELECT shop_id, huice_name, shop_name FROM shops WHERE huice_name = ?').get(huiceName);
   return row;
+}
+
+export function upsertShop(huiceName) {
+  return upsertShopWithDb(getDb(), huiceName);
 }
 
 /** 批量插入每日利润(有则更新) */
@@ -462,8 +465,7 @@ export function findShopByName(huiceName) {
   return db.prepare('SELECT * FROM shops WHERE huice_name = ?').get(huiceName);
 }
 
-export function upsertShopDailyProfit(record) {
-  const db = getDb();
+function upsertShopDailyProfitWithDb(db, record) {
   db.prepare(`
     INSERT INTO shop_daily_profit (shop_id, date, sales_amount, promo_spend, platform_fee, labor_fee, net_profit, net_profit_rate, promo_fee_ratio, roi, metrics_json, raw_row_json)
     VALUES (@shopId, @date, @salesAmount, @promoSpend, @platformFee, @laborFee, @netProfit, @netProfitRate, @promoFeeRatio, @roi, @metricsJson, @rawRowJson)
@@ -493,6 +495,26 @@ export function upsertShopDailyProfit(record) {
     metricsJson: JSON.stringify(record.metrics || {}),
     rawRowJson: JSON.stringify(record.rawRow || {}),
   });
+}
+
+export function upsertShopDailyProfit(record) {
+  return upsertShopDailyProfitWithDb(getDb(), record);
+}
+
+/** 店铺级:原子解析/更新店铺并批量 upsert 日利润,返回入库条数 */
+export function bulkUpsertShopDailyProfit(records) {
+  if (!records?.length) return 0;
+  const db = getDb();
+  const tx = db.transaction((rows) => {
+    let count = 0;
+    for (const record of rows) {
+      const shop = upsertShopWithDb(db, record.shopName);
+      upsertShopDailyProfitWithDb(db, { ...record, shopId: shop.shop_id });
+      count++;
+    }
+    return count;
+  });
+  return tx(records);
 }
 
 export function getShopDailyProfitRange(shopId, startDate, endDate) {

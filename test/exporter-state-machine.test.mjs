@@ -220,10 +220,13 @@ test('product exporter atomically replaces each validated date before publishing
   assert.match(product.slice(replaceIndex, archiveIndex), /catch \(e\)[\s\S]*markCollectorFailure\(result, targetDate/);
 });
 
-test('shop exporter requires a complete insert before publishing and marking a date successful', async () => {
+test('shop exporter uses the transactional DB batch before publishing and marking a date successful', async () => {
   const [, shop] = await sources();
+  assert.match(shop, /import \{ bulkUpsertShopDailyProfit, getDbPath \}/);
+  assert.doesNotMatch(shop, /function insertRecords\(/);
+
   const recordsIndex = shop.indexOf('const records = parseShopExportRows');
-  const insertIndex = shop.indexOf('insertRecords(records)', recordsIndex);
+  const insertIndex = shop.indexOf('bulkUpsertShopDailyProfit(records)', recordsIndex);
   const countGuardIndex = shop.indexOf('inserted !== records.length', insertIndex);
   const archiveIndex = shop.indexOf('renameSync(', recordsIndex);
   const snapshotIndex = shop.indexOf('writeFileSync(', archiveIndex);
@@ -236,4 +239,50 @@ test('shop exporter requires a complete insert before publishing and marking a d
   assert.ok(snapshotIndex > archiveIndex, 'shop JSON snapshot must follow archive');
   assert.ok(appendIndex > snapshotIndex, 'shop aggregate append must follow JSON snapshot');
   assert.ok(successIndex > appendIndex, 'shop date is successful only after persistence and artifacts');
+});
+
+test('both exporters deduplicate requested dates before looping while preserving first occurrence order', async () => {
+  const [product, shop] = await sources();
+  for (const source of [product, shop]) {
+    const dateListIndex = source.indexOf('dateList');
+    const loopIndex = source.indexOf('for (let i = 0; i < dateList.length; i++)', dateListIndex);
+    const setup = source.slice(dateListIndex, loopIndex);
+
+    assert.match(setup, /(?:Array\.from|\[\.\.\.)\(?(?:new )?Set\(/);
+    assert.doesNotMatch(setup, /customDates\.sort\(|\[\.\.\.dates\]\.sort\(/);
+    assert.ok(loopIndex > dateListIndex, 'date deduplication must happen before the exporter loop');
+  }
+});
+
+test('product per-date persistence and publication failures are marked without skipping finalization', async () => {
+  const [product] = await sources();
+  const loopStart = product.indexOf('for (let i = 0; i < dateList.length; i++)');
+  const loopEnd = product.indexOf('\n  const fullySuccessful =', loopStart);
+  const loop = product.slice(loopStart, loopEnd);
+  const persistenceIndex = loop.indexOf('replaceProductProfitDateSnapshot(records)');
+  const archiveIndex = loop.indexOf('renameSync(xlsxPath, archivePath)', persistenceIndex);
+  const jsonIndex = loop.indexOf('publishJsonAtomically(', archiveIndex);
+  const catchIndex = loop.lastIndexOf('catch (e)');
+  const failureIndex = loop.indexOf('markCollectorFailure(result, targetDate', catchIndex);
+
+  assert.ok(persistenceIndex >= 0, 'expected per-date persistence');
+  assert.ok(archiveIndex > persistenceIndex, 'expected per-date archive publication');
+  assert.ok(jsonIndex > archiveIndex, 'expected atomic per-date JSON publication');
+  assert.ok(catchIndex > jsonIndex, 'one per-date catch must cover persistence and publication');
+  assert.ok(failureIndex > catchIndex, 'per-date catch must mark collector failure');
+  assert.match(product.slice(loopEnd), /const fullySuccessful =/);
+  assert.match(product.slice(loopEnd), /failed-dates\.json/);
+});
+
+test('product JSON publication uses a sibling temp file and rename, and websocket closes in finally', async () => {
+  const [product] = await sources();
+  const publishStart = product.indexOf('function publishJsonAtomically');
+  const publishEnd = product.indexOf('\nasync function main', publishStart);
+  const publisher = product.slice(publishStart, publishEnd);
+
+  assert.match(publisher, /writeFileSync\(tempPath/);
+  assert.match(publisher, /renameSync\(tempPath, filePath\)/);
+  assert.match(publisher, /finally/);
+  assert.match(publisher, /unlinkSync\(tempPath\)/);
+  assert.match(product, /finally \{\s*ws\.close\(\);\s*\}/);
 });
