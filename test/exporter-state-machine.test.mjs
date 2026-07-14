@@ -30,6 +30,52 @@ test('both exporters use the shared task picker and poll decision with a pre-sub
   }
 });
 
+test('both exporters import and invoke the shared download-center business resolver', async () => {
+  const [product, shop] = await sources();
+  for (const source of [product, shop]) {
+    assert.match(source, /import \{[^}]*downloadCenterBusinessResolverSource[^}]*\} from ['"]\.\.\/scripts\/huice\/lib\/export-flow\.mjs['"]/s);
+    assert.match(source, /async function resolveDownloadCenterBusinessLayer\(ws\)/);
+    assert.match(source, /cdpEval\(ws,\s*downloadCenterBusinessResolverSource\)/);
+  }
+});
+
+test('both business-layer helpers retry only not-found, fail ambiguous immediately, and retain exhaustion diagnostics', async () => {
+  const [product, shop] = await sources();
+  for (const source of [product, shop]) {
+    const start = source.indexOf('async function resolveDownloadCenterBusinessLayer');
+    const end = source.indexOf('\nasync function collectDownloadCenterTasks', start);
+    const resolver = source.slice(start, end);
+
+    assert.match(resolver, /const maxAttempts = 20/);
+    assert.match(resolver, /for \(let attempt = 0; attempt < maxAttempts; attempt\+\+\)/);
+    assert.match(resolver, /const result = await cdpEval\(ws,\s*downloadCenterBusinessResolverSource\)/);
+    assert.match(resolver, /if \(result\?\.ok\) return result\.layerId/);
+    assert.match(resolver, /if \(result\?\.reason === ['"]ambiguous['"]\) throw new Error\([^\n]*JSON\.stringify\(result\?\.diagnostics \|\| \{\}\)/);
+    assert.match(resolver, /if \(result\?\.reason !== ['"]not-found['"]\) throw new Error/);
+    assert.match(resolver, /if \(attempt < maxAttempts - 1\) await sleep\(500\)/);
+    assert.match(resolver, /throw new Error\([^\n]*maxAttempts[^\n]*JSON\.stringify\(lastResult\?\.diagnostics \|\| \{\}\)/);
+
+    const ambiguousIndex = resolver.indexOf("result?.reason === 'ambiguous'");
+    const sleepIndex = resolver.indexOf('await sleep(500)');
+    const exhaustionIndex = resolver.lastIndexOf('throw new Error');
+    assert.ok(ambiguousIndex >= 0 && ambiguousIndex < sleepIndex, 'ambiguous must throw before any retry sleep');
+    assert.ok(exhaustionIndex > sleepIndex, 'retry exhaustion must throw after the bounded loop');
+  }
+});
+
+test('download-center layerId is threaded through collection, query, baseline, and download operations', async () => {
+  const [product, shop] = await sources();
+  for (const source of [product, shop]) {
+    assert.match(source, /async function collectDownloadCenterTasks\(ws, layerId\)/);
+    assert.match(source, /async function queryDownloadCenter\(ws, layerId\)/);
+    assert.match(source, /async function downloadFromCenter\(ws, layerId, criteria\)/);
+    assert.match(source, /collectDownloadCenterTasks\(ws, layerId\)/);
+    assert.match(source, /queryDownloadCenter\(ws, layerId\)/);
+    assert.match(source, /downloadFromCenter\(ws, layerId,/);
+    assert.match(source, /data-huice-download-layer-id/);
+  }
+});
+
 test('download-center task extraction prefers Vue AG-Grid row data without returning URL fields', async () => {
   const [product, shop] = await sources();
   for (const source of [product, shop]) {
@@ -142,7 +188,7 @@ test('product workbook validation accepts exact 链接ID and uses normal openpyx
   assert.match(parser, /row\[2\]/);
 });
 
-test('download-center operations stay inside the visible download layer even when notifications cover it', async () => {
+test('download-center operations use only the resolved layerId root and never a global-first grid', async () => {
   const [product, shop] = await sources();
   for (const source of [product, shop]) {
     const collectStart = source.indexOf('async function collectDownloadCenterTasks');
@@ -154,19 +200,21 @@ test('download-center operations stay inside the visible download layer even whe
     const query = source.slice(queryStart, baselineStart);
     const downloader = source.slice(downloadStart, downloadEnd);
 
-    assert.match(collector, /downloadRoot/);
-    assert.match(collector, /downloadRoot\.querySelector\(['"]\.v-ag-grid['"]\)/);
-    assert.doesNotMatch(collector, /document\.querySelector\(['"]\.v-ag-grid['"]\)/);
+    for (const operation of [collector, query, downloader]) {
+      assert.match(operation, /data-huice-download-layer-id/);
+      assert.match(operation, /CSS\.escape\(layerId\)/);
+      assert.doesNotMatch(operation, /querySelectorAll\(['"]\.analyzerContainer\.view['"]\)/);
+      assert.doesNotMatch(operation, /document\.querySelector\(['"]\.v-ag-grid['"]\)/);
+      assert.doesNotMatch(operation, /dismissPassiveUi\(/);
+    }
 
+    assert.match(collector, /downloadRoot\.querySelector\(['"]\.v-ag-grid\[data-huice-download-layer-id=/);
+    assert.match(query, /downloadRoot\.querySelector\(['"]\.v-ag-grid\[data-huice-download-layer-id=/);
     assert.match(query, /downloadRoot\.querySelectorAll\(['"]button, \.el-button, \[role=button\]['"]\)/);
     assert.doesNotMatch(query, /document\.querySelectorAll\(['"]button, \.el-button/);
-    assert.doesNotMatch(query, /dismissPassiveUi\(/);
     assert.doesNotMatch(query, /download center query button not found/);
     assert.doesNotMatch(query, /throw new Error/);
-
-    assert.match(downloader, /downloadRoot/);
-    assert.match(downloader, /downloadRoot\?\.querySelector\(['"]\.v-ag-grid['"]\)/);
-    assert.doesNotMatch(downloader, /document\.querySelector\(['"]\.v-ag-grid['"]\)/);
+    assert.match(downloader, /downloadRoot\?\.querySelector\(['"]\.v-ag-grid\[data-huice-download-layer-id=/);
   }
 });
 
@@ -184,7 +232,23 @@ test('download-center query is optional and route readiness is checked before po
     const downloader = source.slice(downloadStart, downloaderEnd);
 
     assert.match(baseline, /waitForDownloadCenterLayer\(ws\)/);
+    assert.match(baseline, /resolveDownloadCenterBusinessLayer\(ws\)/);
     assert.match(downloader, /waitForDownloadCenterLayer\(ws\)/);
+  }
+});
+
+test('download-center reload invalidates the old DOM identity and resolves a fresh layerId', async () => {
+  const [product, shop] = await sources();
+  for (const source of [product, shop]) {
+    const downloadStart = source.indexOf('async function downloadFromCenter');
+    const downloadEnd = source.indexOf('\n/**', downloadStart + 1);
+    const downloader = source.slice(downloadStart, downloadEnd);
+    const reloadStart = downloader.indexOf("if (poll.action === 'reload')");
+    const reloadBranch = downloader.slice(reloadStart, downloader.indexOf('\n    }', reloadStart) + 6);
+
+    assert.match(reloadBranch, /location\.reload\(\)/);
+    assert.match(reloadBranch, /layerId\s*=\s*await resolveDownloadCenterBusinessLayer\(ws\)/);
+    assert.match(reloadBranch, /queryDownloadCenter\(ws, layerId\)/);
   }
 });
 

@@ -19,14 +19,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { replaceProductProfitDateSnapshot, getDbPath } from '../scripts/huice/lib/db.mjs';
 import { collectorExitCode, createCollectorResult, markCollectorFailure } from '../scripts/huice/lib/collector-result.mjs';
-import { decideExportPoll, normalizeExportTask, pickExportTask } from '../scripts/huice/lib/export-flow.mjs';
+import { decideExportPoll, downloadCenterBusinessResolverSource, normalizeExportTask, pickExportTask } from '../scripts/huice/lib/export-flow.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const OUTPUT_DIR = path.resolve(ROOT, 'output/huice-exports');
 const DOWNLOAD_DIR = path.resolve(process.env.HOME, 'Downloads');
 const DOWNLOAD_CENTER_URL = 'https://hjy.huice.com/#/baseSettings/downloadCenter';
-const DOWNLOAD_CENTER_ROOT_SELECTOR = '.analyzerContainer.view';
 
 const args = process.argv.slice(2);
 let days = 1;
@@ -197,26 +196,41 @@ async function waitForNewXlsx(beforeFiles, { targetDate, validator, timeout = 60
 async function waitForDownloadCenterLayer(ws, timeout = 15000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    const state = await cdpEval(ws, `(() => {
-      const routeReady = location.hash === '#/baseSettings/downloadCenter';
-      const downloadRoot = [...document.querySelectorAll('${DOWNLOAD_CENTER_ROOT_SELECTOR}')]
-        .find(root => root.offsetParent !== null && root.querySelector('.v-ag-grid'));
-      const gridElement = downloadRoot?.querySelector('.v-ag-grid');
-      return { routeReady, layerReady: Boolean(downloadRoot), gridReady: Boolean(gridElement?.__vue__?.gridApi) };
-    })()`);
-    if (state?.routeReady && state?.layerReady && state?.gridReady) return state;
+    const state = await cdpEval(ws, `(() => ({
+      routeReady: location.hash === '#/baseSettings/downloadCenter',
+      visibleGridReady: [...document.querySelectorAll('.v-ag-grid')].some(grid => {
+        const rect = grid.getBoundingClientRect();
+        return grid.offsetParent !== null && rect.width > 0 && rect.height > 0 && Boolean(grid.__vue__?.gridApi);
+      })
+    }))()`);
+    if (state?.routeReady && state?.visibleGridReady) return state;
     if (!state?.routeReady) await cdpEval(ws, `location.href = "${DOWNLOAD_CENTER_URL}"`);
     await sleep(500);
   }
   throw new Error('download center layer not ready');
 }
 
-async function collectDownloadCenterTasks(ws) {
+async function resolveDownloadCenterBusinessLayer(ws) {
+  const maxAttempts = 20;
+  let lastResult = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const result = await cdpEval(ws, downloadCenterBusinessResolverSource);
+    if (result?.ok) return result.layerId;
+    if (result?.reason === 'ambiguous') throw new Error(`download center business layer ambiguous: ${JSON.stringify(result?.diagnostics || {})}`);
+    if (result?.reason !== 'not-found') throw new Error(`download center business layer ${result?.reason || 'unknown'}: ${JSON.stringify(result?.diagnostics || {})}`);
+    lastResult = result;
+    if (attempt < maxAttempts - 1) await sleep(500);
+  }
+  throw new Error(`download center business layer not-found after ${maxAttempts} attempts: ${JSON.stringify(lastResult?.diagnostics || {})}`);
+}
+
+async function collectDownloadCenterTasks(ws, layerId) {
   return await cdpEval(ws, `(() => {
-    const downloadRoot = [...document.querySelectorAll('${DOWNLOAD_CENTER_ROOT_SELECTOR}')]
-      .find(root => root.offsetParent !== null && root.querySelector('.v-ag-grid'));
+    const layerId = ${JSON.stringify(layerId)};
+    const escapedLayerId = CSS.escape(layerId);
+    const downloadRoot = document.querySelector('.analyzerContainer.view[data-huice-download-layer-id="' + escapedLayerId + '"]');
     if (!downloadRoot) return [];
-    const gridElement = downloadRoot.querySelector('.v-ag-grid');
+    const gridElement = downloadRoot.querySelector('.v-ag-grid[data-huice-download-layer-id="' + escapedLayerId + '"]');
     const gridApi = gridElement?.__vue__?.gridApi;
     if (gridApi?.forEachNode) {
       const tasks = [];
@@ -262,11 +276,14 @@ async function collectDownloadCenterTasks(ws) {
   })()`);
 }
 
-async function queryDownloadCenter(ws) {
+async function queryDownloadCenter(ws, layerId) {
   const result = await cdpEval(ws, `(() => {
-    const downloadRoot = [...document.querySelectorAll('${DOWNLOAD_CENTER_ROOT_SELECTOR}')]
-      .find(root => root.offsetParent !== null && root.querySelector('.v-ag-grid'));
+    const layerId = ${JSON.stringify(layerId)};
+    const escapedLayerId = CSS.escape(layerId);
+    const downloadRoot = document.querySelector('.analyzerContainer.view[data-huice-download-layer-id="' + escapedLayerId + '"]');
     if (!downloadRoot) return { ok: true, clicked: false, layerReady: false };
+    const gridElement = downloadRoot.querySelector('.v-ag-grid[data-huice-download-layer-id="' + escapedLayerId + '"]');
+    if (!gridElement) return { ok: true, clicked: false, layerReady: false };
     const button = [...downloadRoot.querySelectorAll('button, .el-button, [role=button]')]
       .find(item => ['查询', '搜索'].includes((item.innerText || '').trim()) && !item.disabled);
     if (!button) return { ok: true, clicked: false, layerReady: true };
@@ -280,19 +297,21 @@ async function queryDownloadCenter(ws) {
 async function collectDownloadCenterBaseline(ws) {
   await cdpEval(ws, `location.href = "${DOWNLOAD_CENTER_URL}"`);
   await waitForDownloadCenterLayer(ws);
-  await queryDownloadCenter(ws);
-  const tasks = await collectDownloadCenterTasks(ws);
-  return tasks.map(task => normalizeExportTask(task).key);
+  const layerId = await resolveDownloadCenterBusinessLayer(ws);
+  await queryDownloadCenter(ws, layerId);
+  const tasks = await collectDownloadCenterTasks(ws, layerId);
+  return { layerId, taskKeys: tasks.map(task => normalizeExportTask(task).key) };
 }
 
-async function downloadFromCenter(ws, criteria) {
+async function downloadFromCenter(ws, layerId, criteria) {
   await cdpEval(ws, `location.href = "${DOWNLOAD_CENTER_URL}"`);
   await waitForDownloadCenterLayer(ws);
-  await queryDownloadCenter(ws);
+  layerId = await resolveDownloadCenterBusinessLayer(ws);
+  await queryDownloadCenter(ws, layerId);
   const maxAttempts = 20;
   let lastDecision = null;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const tasks = await collectDownloadCenterTasks(ws);
+    const tasks = await collectDownloadCenterTasks(ws, layerId);
     const taskDecision = pickExportTask(tasks, criteria);
     const poll = decideExportPoll({ attempt, maxAttempts, refreshEvery: 3, taskDecision });
     lastDecision = poll;
@@ -300,10 +319,11 @@ async function downloadFromCenter(ws, criteria) {
       const selected = taskDecision.selected;
       const clicked = await cdpEval(ws, `(async () => {
         const selectedTaskId = ${JSON.stringify(selected.id)};
+        const layerId = ${JSON.stringify(layerId)};
+        const escapedLayerId = CSS.escape(layerId);
         const roots = ['.ag-center-cols-container', '.ag-pinned-left-cols-container', '.ag-pinned-right-cols-container'];
-        const downloadRoot = [...document.querySelectorAll('${DOWNLOAD_CENTER_ROOT_SELECTOR}')]
-          .find(root => root.offsetParent !== null && root.querySelector('.v-ag-grid'));
-        const gridElement = downloadRoot?.querySelector('.v-ag-grid');
+        const downloadRoot = document.querySelector('.analyzerContainer.view[data-huice-download-layer-id="' + escapedLayerId + '"]');
+        const gridElement = downloadRoot?.querySelector('.v-ag-grid[data-huice-download-layer-id="' + escapedLayerId + '"]');
         const gridApi = gridElement?.__vue__?.gridApi;
         if (!selectedTaskId || !gridApi?.forEachNode) return { ok: false, reason: 'selected task row unavailable' };
         let selectedRowIndex = null;
@@ -337,7 +357,8 @@ async function downloadFromCenter(ws, criteria) {
     if (poll.action === 'reload') {
       await cdpEval(ws, 'location.reload()');
       await waitForDownloadCenterLayer(ws);
-      await queryDownloadCenter(ws);
+      layerId = await resolveDownloadCenterBusinessLayer(ws);
+      await queryDownloadCenter(ws, layerId);
     } else {
       await sleep(1500);
     }
@@ -542,7 +563,8 @@ async function main() {
     await sleep(5000);
 
     // 3. 提交导出前先记录下载中心已有任务。
-    const baselineTaskKeys = await collectDownloadCenterBaseline(ws);
+    const baseline = await collectDownloadCenterBaseline(ws);
+    const baselineTaskKeys = baseline.taskKeys;
     await cdpEval(ws, 'location.href = "https://hjy.huice.com/#/opertData/CommodityAnalysis"');
     await sleep(4000);
     const restoredDate = await setDateRangeByPanel(ws, targetDate);
@@ -602,7 +624,7 @@ async function main() {
     await sleep(6000);
 
     const beforeFiles = snapshotDownloadFiles();
-    const downloadResult = await downloadFromCenter(ws, {
+    const downloadResult = await downloadFromCenter(ws, baseline.layerId, {
       kind: 'product',
       requestedAt: exportRequestedAt,
       baselineTaskKeys,
