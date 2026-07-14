@@ -308,10 +308,7 @@ export function getDailyProfitRange(shopId, startDate, endDate) {
   return rows.map(r => ({ ...r, metrics: JSON.parse(r.metrics_json) }));
 }
 
-/** 商品级:单条 upsert(来自 huice-sync.mjs 抓的 record) */
-export function upsertProductProfit(record) {
-  const db = getDb();
-  const normalized = normalizeProfitRecord(record);
+function upsertProductProfitWithDb(db, normalized) {
   // 尝试用 shopName 反查 shop_id(可选关联)
   let shopId = null;
   if (normalized.shopName) {
@@ -377,6 +374,11 @@ export function upsertProductProfit(record) {
   );
 }
 
+/** 商品级:单条 upsert(来自 huice-sync.mjs 抓的 record) */
+export function upsertProductProfit(record) {
+  return upsertProductProfitWithDb(getDb(), normalizeProfitRecord(record));
+}
+
 /** 商品级:批量 upsert(同日多商品),返回入库条数 */
 export function bulkUpsertProductProfit(records) {
   if (!records?.length) return 0;
@@ -385,12 +387,40 @@ export function bulkUpsertProductProfit(records) {
     let n = 0;
     for (const r of rows) {
       if (!r.productId || !r.date) continue;
-      upsertProductProfit(r);
+      upsertProductProfitWithDb(db, normalizeProfitRecord(r));
       n++;
     }
     return n;
   });
   return tx(records);
+}
+
+/** 商品级:原子替换单日完整快照,返回入库条数 */
+export function replaceProductProfitDateSnapshot(records) {
+  if (!Array.isArray(records) || records.length === 0) {
+    throw new TypeError('product profit snapshot must be a non-empty array');
+  }
+
+  const normalizedRows = records.map(record => normalizeProfitRecord(record));
+  for (const row of normalizedRows) {
+    if (!row.productId || !row.date) {
+      throw new TypeError('every product profit snapshot row requires productId and date');
+    }
+  }
+
+  const dates = new Set(normalizedRows.map(row => row.date));
+  if (dates.size !== 1) {
+    throw new TypeError('product profit snapshot must contain exactly one date');
+  }
+
+  const db = getDb();
+  const date = normalizedRows[0].date;
+  const tx = db.transaction((rows) => {
+    db.prepare('DELETE FROM product_profit WHERE date = ?').run(date);
+    for (const row of rows) upsertProductProfitWithDb(db, row);
+    return rows.length;
+  });
+  return tx(normalizedRows);
 }
 
 /** 商品级:查某日所有商品记录 */
