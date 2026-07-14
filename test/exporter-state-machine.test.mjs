@@ -203,21 +203,29 @@ test('product exporter atomically replaces each validated date before publishing
   assert.match(product, /import \{ replaceProductProfitDateSnapshot, getDbPath \}/);
   assert.doesNotMatch(product, /bulkUpsertProductProfit/);
 
-  const recordsIndex = product.indexOf('const records = downloadedXlsx.value');
-  const replaceIndex = product.indexOf('replaceProductProfitDateSnapshot(records)', recordsIndex);
-  const countGuardIndex = product.indexOf('inserted !== records.length', replaceIndex);
-  const archiveIndex = product.indexOf('renameSync(', recordsIndex);
-  const snapshotIndex = product.indexOf('writeFileSync(', archiveIndex);
-  const appendIndex = product.indexOf('allRecords.push(...records)', snapshotIndex);
-  const successIndex = product.indexOf('successfulDates.add(targetDate)', appendIndex);
+  const loopStart = product.indexOf('for (let i = 0; i < dateList.length; i++)');
+  const loopEnd = product.indexOf('\n  const fullySuccessful =', loopStart);
+  const loop = product.slice(loopStart, loopEnd);
+  const recordsIndex = loop.indexOf('const records = downloadedXlsx.value');
+  const replaceIndex = loop.indexOf('replaceProductProfitDateSnapshot(records)', recordsIndex);
+  const countGuardIndex = loop.indexOf('inserted !== records.length', replaceIndex);
+  const archiveIndex = loop.indexOf('renameSync(xlsxPath, archivePath)', countGuardIndex);
+  const publishIndex = loop.indexOf('publishJsonAtomically(', archiveIndex);
+  const appendIndex = loop.indexOf('allRecords.push(...records)', publishIndex);
+  const successIndex = loop.indexOf('successfulDates.add(targetDate)', appendIndex);
+  const catchIndex = loop.indexOf('catch (e)', successIndex);
+  const failureIndex = loop.indexOf('markCollectorFailure(result, targetDate', catchIndex);
 
+  assert.ok(loopStart >= 0 && loopEnd > loopStart, 'expected the per-date export loop');
+  assert.ok(recordsIndex >= 0, 'expected parsed records inside the per-date loop');
   assert.ok(replaceIndex > recordsIndex, 'product date snapshot must be persisted after parsing');
   assert.ok(countGuardIndex > replaceIndex, 'product persistence must reject a count mismatch');
   assert.ok(archiveIndex > countGuardIndex, 'product archive must follow successful persistence');
-  assert.ok(snapshotIndex > archiveIndex, 'product JSON snapshot must follow archive');
-  assert.ok(appendIndex > snapshotIndex, 'product aggregate append must follow JSON snapshot');
+  assert.ok(publishIndex > archiveIndex, 'atomic product JSON publication must follow archive');
+  assert.ok(appendIndex > publishIndex, 'product aggregate append must follow JSON publication');
   assert.ok(successIndex > appendIndex, 'product date is successful only after all artifacts are published');
-  assert.match(product.slice(replaceIndex, archiveIndex), /catch \(e\)[\s\S]*markCollectorFailure\(result, targetDate/);
+  assert.ok(catchIndex > successIndex, 'per-date catch must cover persistence and artifact publication');
+  assert.ok(failureIndex > catchIndex, 'per-date catch must mark collector failure');
 });
 
 test('shop exporter uses the transactional DB batch before publishing and marking a date successful', async () => {

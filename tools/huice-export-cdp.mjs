@@ -641,11 +641,8 @@ async function main() {
       const netProfitCount = records.filter(r => r.netProfit != null).length;
       console.log(`  ✅ ${records.length} 条 (netProfit 有值: ${netProfitCount})`);
 
-      // 7. 仅在完整持久化后发布归档和 JSON 快照；下方统一 catch (e) 会调用
-      // markCollectorFailure(result, targetDate, ...) 并继续处理后续日期。
       const archivePath = path.join(OUTPUT_DIR, `${targetDate.replace(/-/g, '')}.xlsx`);
       renameSync(xlsxPath, archivePath);
-      // publishJsonAtomically 内部先 writeFileSync(tempPath, ...)，再原子 rename 到目标 JSON。
       publishJsonAtomically(
         path.join(OUTPUT_DIR, `${targetDate.replace(/-/g, '')}.json`),
         { date: targetDate, records }
