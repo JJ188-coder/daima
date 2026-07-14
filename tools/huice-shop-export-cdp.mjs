@@ -20,7 +20,7 @@
  * 输出目录: output/huice-shop-exports/
  */
 
-import { writeFileSync, mkdirSync, existsSync, readdirSync, statSync, renameSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync, readdirSync, statSync, renameSync, unlinkSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,6 +36,7 @@ const OUTPUT_DIR = path.resolve(ROOT, 'output/huice-shop-exports');
 const DOWNLOAD_DIR = path.resolve(process.env.HOME, 'Downloads');
 const TARGET_URL = 'https://hjy.huice.com/#/businessAnalysisCenter/report/trendNew';
 const DOWNLOAD_CENTER_URL = 'https://hjy.huice.com/#/baseSettings/downloadCenter';
+const DOWNLOAD_CENTER_ROOT_SELECTOR = '.analyzerContainer.view';
 
 /** 导出选择器常量（供测试用） */
 export const HUICE_SHOP_SELECTORS = {
@@ -437,10 +438,31 @@ async function clickExport(ws) {
 }
 
 
-/** 读取 AG-Grid 的逻辑行,合并 center/左右 pinned 区域。 */
+/** 等下载中心业务层和 AG-Grid 就绪；通知层是否覆盖不影响判断。 */
+async function waitForDownloadCenterLayer(ws, timeout = 15000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const state = await cdpEval(ws, `(() => {
+      const routeReady = location.hash === '#/baseSettings/downloadCenter';
+      const downloadRoot = [...document.querySelectorAll('${DOWNLOAD_CENTER_ROOT_SELECTOR}')]
+        .find(root => root.offsetParent !== null && root.querySelector('.v-ag-grid'));
+      const gridElement = downloadRoot?.querySelector('.v-ag-grid');
+      return { routeReady, layerReady: Boolean(downloadRoot), gridReady: Boolean(gridElement?.__vue__?.gridApi) };
+    })()`);
+    if (state?.routeReady && state?.layerReady && state?.gridReady) return state;
+    if (!state?.routeReady) await cdpEval(ws, `location.href = "${DOWNLOAD_CENTER_URL}"`);
+    await sleep(500);
+  }
+  throw new Error('download center layer not ready');
+}
+
+/** 只读取下载中心业务层的 AG-Grid 逻辑行,不读取通知浮层。 */
 async function collectDownloadCenterTasks(ws) {
   return await cdpEval(ws, `(() => {
-    const gridElement = document.querySelector('.v-ag-grid');
+    const downloadRoot = [...document.querySelectorAll('${DOWNLOAD_CENTER_ROOT_SELECTOR}')]
+      .find(root => root.offsetParent !== null && root.querySelector('.v-ag-grid'));
+    if (!downloadRoot) return [];
+    const gridElement = downloadRoot.querySelector('.v-ag-grid');
     const gridApi = gridElement?.__vue__?.gridApi;
     if (gridApi?.forEachNode) {
       const tasks = [];
@@ -465,7 +487,7 @@ async function collectDownloadCenterTasks(ws) {
     const rows = new Map();
     const getImmutableTaskId = row => row.getAttribute('data-task-id') || row.getAttribute('task-id') || '';
     for (const rootSelector of roots) {
-      for (const row of document.querySelectorAll(rootSelector + ' .ag-row')) {
+      for (const row of gridElement.querySelectorAll(rootSelector + ' .ag-row')) {
         const rowIndex = row.getAttribute('row-index') || '';
         const id = getImmutableTaskId(row);
         const logicalKey = id || rowIndex;
@@ -487,29 +509,31 @@ async function collectDownloadCenterTasks(ws) {
 }
 
 async function queryDownloadCenter(ws) {
-  await dismissPassiveUi(ws);
   const result = await cdpEval(ws, `(() => {
-    const button = [...document.querySelectorAll('button, .el-button')]
-      .find(item => (item.innerText || '').trim() === '查询' && item.offsetParent !== null && !item.disabled);
-    if (!button) return { ok: false, reason: 'download center query button not found' };
+    const downloadRoot = [...document.querySelectorAll('${DOWNLOAD_CENTER_ROOT_SELECTOR}')]
+      .find(root => root.offsetParent !== null && root.querySelector('.v-ag-grid'));
+    if (!downloadRoot) return { ok: true, clicked: false, layerReady: false };
+    const button = [...downloadRoot.querySelectorAll('button, .el-button, [role=button]')]
+      .find(item => ['查询', '搜索'].includes((item.innerText || '').trim()) && !item.disabled);
+    if (!button) return { ok: true, clicked: false, layerReady: true };
     button.click();
-    return { ok: true };
+    return { ok: true, clicked: true, layerReady: true };
   })()`);
-  if (!result?.ok) throw new Error(result?.reason || 'download center query failed');
-  await sleep(4000);
+  if (result?.clicked) await sleep(1500);
+  return result;
 }
 
 async function collectDownloadCenterBaseline(ws) {
   await cdpEval(ws, `location.href = "${DOWNLOAD_CENTER_URL}"`);
-  await sleep(4000);
+  await waitForDownloadCenterLayer(ws);
   await queryDownloadCenter(ws);
   return (await collectDownloadCenterTasks(ws)).map(task => normalizeExportTask(task).key);
 }
 
-/** 去下载中心,等本次新任务出现再下载 */
+/** 去下载中心,只在下载业务层等本次新任务出现并精确下载。 */
 async function downloadFromCenter(ws, criteria) {
   await cdpEval(ws, `location.href = "${DOWNLOAD_CENTER_URL}"`);
-  await sleep(4000);
+  await waitForDownloadCenterLayer(ws);
   await queryDownloadCenter(ws);
   const maxAttempts = 20;
   let lastDecision = null;
@@ -523,7 +547,10 @@ async function downloadFromCenter(ws, criteria) {
       const clicked = await cdpEval(ws, `(async () => {
         const selectedTaskId = ${JSON.stringify(selected.id)};
         const roots = ['.ag-center-cols-container', '.ag-pinned-left-cols-container', '.ag-pinned-right-cols-container'];
-        const gridApi = document.querySelector('.v-ag-grid')?.__vue__?.gridApi;
+        const downloadRoot = [...document.querySelectorAll('${DOWNLOAD_CENTER_ROOT_SELECTOR}')]
+          .find(root => root.offsetParent !== null && root.querySelector('.v-ag-grid'));
+        const gridElement = downloadRoot?.querySelector('.v-ag-grid');
+        const gridApi = gridElement?.__vue__?.gridApi;
         if (!selectedTaskId || !gridApi?.forEachNode) return { ok: false, reason: 'selected task row unavailable' };
         let selectedRowIndex = null;
         gridApi.forEachNode(node => {
@@ -537,7 +564,7 @@ async function downloadFromCenter(ws, criteria) {
         for (let clickAttempt = 0; clickAttempt < 6; clickAttempt++) {
           await new Promise(resolve => setTimeout(resolve, 150));
           for (const rootSelector of roots) {
-            const row = [...document.querySelectorAll(rootSelector + ' .ag-row')]
+            const row = [...gridElement.querySelectorAll(rootSelector + ' .ag-row')]
               .find(item => item.getAttribute('row-index') === rowIndexText);
             const operation = row?.querySelector('[col-id="operation"]');
             const button = operation?.querySelector('button, .el-button, [role=button]');
@@ -556,7 +583,7 @@ async function downloadFromCenter(ws, criteria) {
     if (poll.action === 'fail') return { ok: false, reason: poll.reason, candidates: poll.candidates };
     if (poll.action === 'reload') {
       await cdpEval(ws, 'location.reload()');
-      await sleep(4000);
+      await waitForDownloadCenterLayer(ws);
       await queryDownloadCenter(ws);
     } else {
       await sleep(1500);
@@ -680,6 +707,7 @@ async function main() {
 
   const allRecords = [];
   const failedDates = result.failedDates;
+  const successfulDates = new Set();
   const consumedTaskKeys = new Set();
 
   for (let i = 0; i < dateList.length; i++) {
@@ -772,30 +800,23 @@ async function main() {
         markCollectorFailure(result, targetDate, 'no valid shop records');
         continue;
       }
+      // 10. 必须完整入库，部分插入不能视为该日期成功。
+      const inserted = insertRecords(records);
+      if (inserted !== records.length) throw new Error(`SQLite insert count mismatch: ${inserted}/${records.length}`);
+      console.log(`  📦 SQLite 入库 ${inserted} 条 -> ${getDbPath()}`);
+
       const profitCount = records.filter(r => r.netProfit != null).length;
       console.log(`  ✅ ${records.length} 家店铺 (netProfit 有值: ${profitCount})`);
 
-      // 10. 归档 xlsx
+      // 11. 仅在完整入库后发布归档和 JSON 快照。
       const archivePath = path.join(OUTPUT_DIR, `${targetDate.replace(/-/g, '')}.xlsx`);
       renameSync(xlsxPath, archivePath);
-
-      // 11. 保存 JSON 快照
-      allRecords.push(...records);
       writeFileSync(
         path.join(OUTPUT_DIR, `${targetDate.replace(/-/g, '')}.json`),
         JSON.stringify({ date: targetDate, records }, null, 2)
       );
-
-      // 12. 入库（upsertShop + upsertShopDailyProfit）
-      if (records.length > 0) {
-        try {
-          const inserted = insertRecords(records);
-          console.log(`  📦 SQLite 入库 ${inserted} 条 -> ${getDbPath()}`);
-        } catch (e) {
-          console.log(`  ⚠️ SQLite 入库失败: ${e.message}`);
-          markCollectorFailure(result, targetDate, 'SQLite insert failed');
-        }
-      }
+      allRecords.push(...records);
+      successfulDates.add(targetDate);
 
     } catch (e) {
       console.log(`  ❌ 采集失败: ${e.message}`);
@@ -805,8 +826,15 @@ async function main() {
 
   ws.close();
 
+  const fullySuccessful = allRecords.length > 0
+    && successfulDates.size === dateList.length
+    && dateList.every(date => successfulDates.has(date))
+    && failedDates.length === 0
+    && !result.fatalError;
+  const failLog = path.join(OUTPUT_DIR, 'failed-dates.json');
+
   // 汇总落盘
-  if (allRecords.length > 0 && failedDates.length === 0 && !result.fatalError) {
+  if (fullySuccessful) {
     const summaryFile = path.join(OUTPUT_DIR, 'huice-shop-latest.json');
     writeFileSync(summaryFile, JSON.stringify(allRecords, null, 2));
     console.log(`\n💾 数据落盘: ${summaryFile} (${allRecords.length} 条)`);
@@ -815,13 +843,14 @@ async function main() {
   }
   console.log(`✅ 回采完成`);
 
-  // 失败日期汇总
+  // 失败日期汇总；只有完整成功才清理历史失败标记。
   if (failedDates.length > 0) {
-    const failLog = path.join(OUTPUT_DIR, 'failed-dates.json');
     writeFileSync(failLog, JSON.stringify({ dates: failedDates, failures: result.failures, ts: new Date().toISOString() }, null, 2));
     console.log(`⚠️ ${failedDates.length} 天采集失败,已记录到 ${failLog}`);
     console.log(`   失败日期: ${failedDates.join(', ')}`);
     console.log(`   补采命令: node tools/huice-shop-export-cdp.mjs --dates ${failedDates.join(',')}`);
+  } else if (fullySuccessful) {
+    if (existsSync(failLog)) unlinkSync(failLog);
   }
   return result;
 }

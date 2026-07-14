@@ -71,12 +71,19 @@ test('passive cleanup excludes business confirmation labels and product popover 
   assert.match(product, /export menu not found|export all control not found/);
 });
 
-test('aggregate latest files are written only when the run produced records without failures', async () => {
+test('aggregate latest files require every requested date to complete successfully', async () => {
   const [product, shop] = await sources();
-  assert.match(product, /allRecords\.length > 0 && failedDates\.length === 0/);
-  assert.match(shop, /allRecords\.length > 0 && failedDates\.length === 0/);
-  assert.match(product, /failures: result\.failures/);
-  assert.match(shop, /failures: result\.failures/);
+  for (const source of [product, shop]) {
+    assert.match(source, /const successfulDates = new Set\(\)/);
+    assert.match(source, /const fullySuccessful =/);
+    assert.match(source, /allRecords\.length > 0/);
+    assert.match(source, /successfulDates\.size === dateList\.length/);
+    assert.match(source, /dateList\.every\(date => successfulDates\.has\(date\)\)/);
+    assert.match(source, /failedDates\.length === 0/);
+    assert.match(source, /!result\.fatalError/);
+    assert.match(source, /if \(fullySuccessful\)/);
+    assert.match(source, /failures: result\.failures/);
+  }
 });
 
 test('both exporters reject zero parsed records before archive, snapshot, or success logging', async () => {
@@ -123,4 +130,110 @@ test('product workbook validation accepts exact 链接ID and uses normal openpyx
   assert.doesNotMatch(parser, /read_only\s*=\s*True/);
   assert.match(parser, /rows\[11:\]/);
   assert.match(parser, /row\[2\]/);
+});
+
+test('download-center operations stay inside the visible download layer even when notifications cover it', async () => {
+  const [product, shop] = await sources();
+  for (const source of [product, shop]) {
+    const collectStart = source.indexOf('async function collectDownloadCenterTasks');
+    const queryStart = source.indexOf('\nasync function queryDownloadCenter', collectStart);
+    const baselineStart = source.indexOf('\nasync function collectDownloadCenterBaseline', queryStart);
+    const downloadStart = source.indexOf('\nasync function downloadFromCenter', baselineStart);
+    const downloadEnd = source.indexOf('\n/**', downloadStart + 1);
+    const collector = source.slice(collectStart, queryStart);
+    const query = source.slice(queryStart, baselineStart);
+    const downloader = source.slice(downloadStart, downloadEnd);
+
+    assert.match(collector, /downloadRoot/);
+    assert.match(collector, /downloadRoot\.querySelector\(['"]\.v-ag-grid['"]\)/);
+    assert.doesNotMatch(collector, /document\.querySelector\(['"]\.v-ag-grid['"]\)/);
+
+    assert.match(query, /downloadRoot\.querySelectorAll\(['"]button, \.el-button, \[role=button\]['"]\)/);
+    assert.doesNotMatch(query, /document\.querySelectorAll\(['"]button, \.el-button/);
+    assert.doesNotMatch(query, /dismissPassiveUi\(/);
+    assert.doesNotMatch(query, /download center query button not found/);
+    assert.doesNotMatch(query, /throw new Error/);
+
+    assert.match(downloader, /downloadRoot/);
+    assert.match(downloader, /downloadRoot\?\.querySelector\(['"]\.v-ag-grid['"]\)/);
+    assert.doesNotMatch(downloader, /document\.querySelector\(['"]\.v-ag-grid['"]\)/);
+  }
+});
+
+test('download-center query is optional and route readiness is checked before polling', async () => {
+  const [product, shop] = await sources();
+  for (const source of [product, shop]) {
+    assert.match(source, /async function waitForDownloadCenterLayer/);
+    assert.match(source, /location\.hash === ['"]#\/baseSettings\/downloadCenter['"]/);
+    assert.match(source, /if \(!button\) return \{ ok: true, clicked: false/);
+
+    const baselineStart = source.indexOf('async function collectDownloadCenterBaseline');
+    const downloadStart = source.indexOf('async function downloadFromCenter', baselineStart);
+    const baseline = source.slice(baselineStart, downloadStart);
+    const downloaderEnd = source.indexOf('\n/**', downloadStart + 1);
+    const downloader = source.slice(downloadStart, downloaderEnd);
+
+    assert.match(baseline, /waitForDownloadCenterLayer\(ws\)/);
+    assert.match(downloader, /waitForDownloadCenterLayer\(ws\)/);
+  }
+});
+
+test('product date picker never clears stale state by clicking an unrelated date', async () => {
+  const [product] = await sources();
+  const start = product.indexOf('async function setDateRangeByPanel');
+  const end = product.indexOf('\n/**', start + 1);
+  const picker = product.slice(start, end);
+
+  assert.doesNotMatch(picker, /otherCell/);
+  assert.doesNotMatch(picker, /classList\.contains\(['"](?:start-date|end-date|in-range)['"]\)/);
+  assert.match(picker, /targetPanel\.querySelectorAll\(['"]td['"]\)/);
+});
+
+test('a stale failed-dates marker is deleted only by the fully successful branch', async () => {
+  const [product, shop] = await sources();
+  for (const source of [product, shop]) {
+    assert.match(source, /unlinkSync/);
+    assert.match(source, /if \(failedDates\.length > 0\)[\s\S]*else if \(fullySuccessful\) \{[\s\S]*if \(existsSync\(failLog\)\) unlinkSync\(failLog\)/);
+    assert.doesNotMatch(source, /(?:if|else if) \(failedDates\.length === 0\)[\s\S]{0,200}unlinkSync\(failLog\)/);
+  }
+});
+
+test('product exporter atomically replaces each validated date before publishing its artifacts', async () => {
+  const [product] = await sources();
+  assert.match(product, /import \{ replaceProductProfitDateSnapshot, getDbPath \}/);
+  assert.doesNotMatch(product, /bulkUpsertProductProfit/);
+
+  const recordsIndex = product.indexOf('const records = downloadedXlsx.value');
+  const replaceIndex = product.indexOf('replaceProductProfitDateSnapshot(records)', recordsIndex);
+  const countGuardIndex = product.indexOf('inserted !== records.length', replaceIndex);
+  const archiveIndex = product.indexOf('renameSync(', recordsIndex);
+  const snapshotIndex = product.indexOf('writeFileSync(', archiveIndex);
+  const appendIndex = product.indexOf('allRecords.push(...records)', snapshotIndex);
+  const successIndex = product.indexOf('successfulDates.add(targetDate)', appendIndex);
+
+  assert.ok(replaceIndex > recordsIndex, 'product date snapshot must be persisted after parsing');
+  assert.ok(countGuardIndex > replaceIndex, 'product persistence must reject a count mismatch');
+  assert.ok(archiveIndex > countGuardIndex, 'product archive must follow successful persistence');
+  assert.ok(snapshotIndex > archiveIndex, 'product JSON snapshot must follow archive');
+  assert.ok(appendIndex > snapshotIndex, 'product aggregate append must follow JSON snapshot');
+  assert.ok(successIndex > appendIndex, 'product date is successful only after all artifacts are published');
+  assert.match(product.slice(replaceIndex, archiveIndex), /catch \(e\)[\s\S]*markCollectorFailure\(result, targetDate/);
+});
+
+test('shop exporter requires a complete insert before publishing and marking a date successful', async () => {
+  const [, shop] = await sources();
+  const recordsIndex = shop.indexOf('const records = parseShopExportRows');
+  const insertIndex = shop.indexOf('insertRecords(records)', recordsIndex);
+  const countGuardIndex = shop.indexOf('inserted !== records.length', insertIndex);
+  const archiveIndex = shop.indexOf('renameSync(', recordsIndex);
+  const snapshotIndex = shop.indexOf('writeFileSync(', archiveIndex);
+  const appendIndex = shop.indexOf('allRecords.push(...records)', snapshotIndex);
+  const successIndex = shop.indexOf('successfulDates.add(targetDate)', appendIndex);
+
+  assert.ok(insertIndex > recordsIndex, 'shop records must be inserted after parsing');
+  assert.ok(countGuardIndex > insertIndex, 'shop persistence must reject partial inserts');
+  assert.ok(archiveIndex > countGuardIndex, 'shop archive must follow complete persistence');
+  assert.ok(snapshotIndex > archiveIndex, 'shop JSON snapshot must follow archive');
+  assert.ok(appendIndex > snapshotIndex, 'shop aggregate append must follow JSON snapshot');
+  assert.ok(successIndex > appendIndex, 'shop date is successful only after persistence and artifacts');
 });
