@@ -25,7 +25,7 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseShopExportRows } from '../scripts/huice/lib/shop-profit.mjs';
-import { upsertShop, upsertShopDailyProfit, getDbPath } from '../scripts/huice/lib/db.mjs';
+import { bulkUpsertShopDailyProfit, getDbPath } from '../scripts/huice/lib/db.mjs';
 import { collectorExitCode, createCollectorResult, markCollectorFailure } from '../scripts/huice/lib/collector-result.mjs';
 import { validateExportRows } from '../scripts/huice/lib/export-validation.mjs';
 import { decideExportPoll, decideExportSubmitState, elementUiActiveDialogPredicateSource, normalizeExportTask, pickExportTask } from '../scripts/huice/lib/export-flow.mjs';
@@ -59,12 +59,12 @@ function dateStr(offset = 0) {
 export function buildShopExportArgs({ dates, days }) {
   let dateList;
   if (dates && dates.length > 0) {
-    dateList = [...dates].sort();
+    dateList = dates;
   } else {
     const n = days || 1;
     dateList = Array.from({ length: n }, (_, i) => dateStr(-(i + 1)));
   }
-  return { dates: dateList, outputDir: OUTPUT_DIR };
+  return { dates: [...new Set(dateList)], outputDir: OUTPUT_DIR };
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -642,31 +642,6 @@ function parseXlsxRaw(xlsxPath) {
   return JSON.parse(result.trim());
 }
 
-/** 将解析后的记录入库（upsertShop + upsertShopDailyProfit） */
-function insertRecords(records) {
-  let count = 0;
-  for (const record of records) {
-    const shop = upsertShop(record.shopName);
-    if (!shop || !shop.shop_id) continue;
-    upsertShopDailyProfit({
-      shopId: shop.shop_id,
-      date: record.date,
-      salesAmount: record.salesAmount,
-      promoSpend: record.promoSpend,
-      platformFee: record.platformFee,
-      laborFee: record.laborFee,
-      netProfit: record.netProfit,
-      netProfitRate: record.netProfitRate,
-      promoFeeRatio: record.promoFeeRatio,
-      roi: record.roi,
-      metrics: record.metrics,
-      rawRow: record.rawRow,
-    });
-    count++;
-  }
-  return count;
-}
-
 // ============ 主流程 ============
 
 async function main() {
@@ -801,7 +776,7 @@ async function main() {
         continue;
       }
       // 10. 必须完整入库，部分插入不能视为该日期成功。
-      const inserted = insertRecords(records);
+      const inserted = bulkUpsertShopDailyProfit(records);
       if (inserted !== records.length) throw new Error(`SQLite insert count mismatch: ${inserted}/${records.length}`);
       console.log(`  📦 SQLite 入库 ${inserted} 条 -> ${getDbPath()}`);
 

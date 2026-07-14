@@ -444,14 +444,24 @@ print(json.dumps(records))
   return JSON.parse(result.trim());
 }
 
+function publishJsonAtomically(filePath, payload) {
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileSync(tempPath, JSON.stringify(payload, null, 2));
+    renameSync(tempPath, filePath);
+  } finally {
+    if (existsSync(tempPath)) unlinkSync(tempPath);
+  }
+}
+
 async function main() {
   const result = createCollectorResult();
   if (!existsSync(OUTPUT_DIR)) mkdirSync(OUTPUT_DIR, { recursive: true });
 
   // 日期列表:--dates 优先,否则按 --days 生成
-  const dateList = customDates.length > 0
-    ? customDates.sort()
-    : Array.from({ length: days }, (_, i) => dateStr(-(i + 1)));
+  const dateList = [...new Set(customDates.length > 0
+    ? customDates
+    : Array.from({ length: days }, (_, i) => dateStr(-(i + 1))))];
 
   console.log(`🚀 慧经营导出回采（${dateList.length} 天）`);
   console.log(`   日期范围: ${dateList[0]} ~ ${dateList[dateList.length - 1]}`);
@@ -465,21 +475,22 @@ async function main() {
     return result;
   }
 
-  const ws = new WebSocket(hjyTab.webSocketDebuggerUrl);
-  await new Promise((r, rej) => { ws.addEventListener('open', r, { once: true }); ws.addEventListener('error', rej, { once: true }); setTimeout(rej, 5000); });
-  console.log(`✅ CDP 已连接`);
-
-  // 确保在 CommodityAnalysis 页
-  const curUrl = await cdpEval(ws, 'location.href');
-  if (!curUrl.includes('CommodityAnalysis')) {
-    await cdpEval(ws, 'location.href = "https://hjy.huice.com/#/opertData/CommodityAnalysis"');
-    await sleep(4000);
-  }
-
   const allRecords = [];
   const failedDates = result.failedDates;
   const successfulDates = new Set();
   const consumedTaskKeys = new Set();
+  const ws = new WebSocket(hjyTab.webSocketDebuggerUrl);
+
+  try {
+    await new Promise((r, rej) => { ws.addEventListener('open', r, { once: true }); ws.addEventListener('error', rej, { once: true }); setTimeout(rej, 5000); });
+    console.log(`✅ CDP 已连接`);
+
+    // 确保在 CommodityAnalysis 页
+    const curUrl = await cdpEval(ws, 'location.href');
+    if (!curUrl.includes('CommodityAnalysis')) {
+      await cdpEval(ws, 'location.href = "https://hjy.huice.com/#/opertData/CommodityAnalysis"');
+      await sleep(4000);
+    }
 
   for (let i = 0; i < dateList.length; i++) {
     const targetDate = dateList[i];
@@ -621,33 +632,39 @@ async function main() {
       continue;
     }
 
-    // 6. 原子替换该日期的完整 SQLite 快照；失败时事务回滚并保留旧数据。
     try {
+      // 6. 原子替换该日期的完整 SQLite 快照；失败时事务回滚并保留旧数据。
       const inserted = replaceProductProfitDateSnapshot(records);
       if (inserted !== records.length) throw new Error(`SQLite snapshot count mismatch: ${inserted}/${records.length}`);
       console.log(`  📦 SQLite 入库 ${inserted} 条 -> ${getDbPath()}`);
+
+      const netProfitCount = records.filter(r => r.netProfit != null).length;
+      console.log(`  ✅ ${records.length} 条 (netProfit 有值: ${netProfitCount})`);
+
+      // 7. 仅在完整持久化后发布归档和 JSON 快照；下方统一 catch (e) 会调用
+      // markCollectorFailure(result, targetDate, ...) 并继续处理后续日期。
+      const archivePath = path.join(OUTPUT_DIR, `${targetDate.replace(/-/g, '')}.xlsx`);
+      renameSync(xlsxPath, archivePath);
+      // publishJsonAtomically 内部先 writeFileSync(tempPath, ...)，再原子 rename 到目标 JSON。
+      publishJsonAtomically(
+        path.join(OUTPUT_DIR, `${targetDate.replace(/-/g, '')}.json`),
+        { date: targetDate, records }
+      );
+      allRecords.push(...records);
+      successfulDates.add(targetDate);
     } catch (e) {
-      console.log(`  ⚠️ SQLite 入库失败: ${e.message}`);
-      markCollectorFailure(result, targetDate, `SQLite snapshot failed: ${e.message}`);
+      console.log(`  ⚠️ 持久化或发布失败: ${e.message}`);
+      markCollectorFailure(result, targetDate, `persistence or publication failed: ${e.message}`);
       continue;
     }
-
-    const netProfitCount = records.filter(r => r.netProfit != null).length;
-    console.log(`  ✅ ${records.length} 条 (netProfit 有值: ${netProfitCount})`);
-
-    // 7. 仅在完整持久化后发布归档和 JSON 快照。
-    const archivePath = path.join(OUTPUT_DIR, `${targetDate.replace(/-/g, '')}.xlsx`);
-    renameSync(xlsxPath, archivePath);
-    writeFileSync(path.join(OUTPUT_DIR, `${targetDate.replace(/-/g, '')}.json`), JSON.stringify({ date: targetDate, records }, null, 2));
-    allRecords.push(...records);
-    successfulDates.add(targetDate);
 
     // 8. 回到商品排名页（为下一天准备）
     await cdpEval(ws, 'location.href = "https://hjy.huice.com/#/opertData/CommodityAnalysis"');
     await sleep(3000);
   }
-
-  ws.close();
+  } finally {
+    ws.close();
+  }
 
   const fullySuccessful = allRecords.length > 0
     && successfulDates.size === dateList.length
