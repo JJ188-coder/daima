@@ -1,13 +1,21 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
-import {
+const tempDir = mkdtempSync(join(tmpdir(), 'huice-product-snapshot-'));
+const tempDbPath = join(tempDir, 'huice-data.sqlite');
+const previousDbPath = process.env.HUICE_DB_PATH;
+process.env.HUICE_DB_PATH = tempDbPath;
+
+const {
   bulkUpsertProductProfit,
   closeDb,
-  getDb,
+  getDbPath,
   getProductProfitByDate,
   replaceProductProfitDateSnapshot,
-} from '../scripts/huice/lib/db.mjs';
+} = await import('../scripts/huice/lib/db.mjs');
 
 const TEST_DATES = [
   '2099-01-11',
@@ -35,15 +43,15 @@ function idsForDate(date) {
   return getProductProfitByDate(date).map(row => row.product_id).sort();
 }
 
-function clearTestRows() {
-  const placeholders = TEST_DATES.map(() => '?').join(', ');
-  getDb().prepare(`DELETE FROM product_profit WHERE date IN (${placeholders})`).run(...TEST_DATES);
-}
+test.before(() => {
+  assert.equal(getDbPath(), tempDbPath, 'snapshot tests must use an isolated temporary database');
+});
 
-test.before(clearTestRows);
 test.after(() => {
-  clearTestRows();
   closeDb();
+  rmSync(tempDir, { recursive: true, force: true });
+  if (previousDbPath === undefined) delete process.env.HUICE_DB_PATH;
+  else process.env.HUICE_DB_PATH = previousDbPath;
 });
 
 test('replacing a same-date snapshot removes products absent from the second snapshot', () => {

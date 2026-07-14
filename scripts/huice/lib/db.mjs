@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { normalizeProfitRecord } from './profit.mjs';
 
 const __dirname = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const DB_PATH = resolve(__dirname, 'private/huice-data.sqlite');
+const DB_PATH = process.env.HUICE_DB_PATH ?? resolve(__dirname, 'private/huice-data.sqlite');
 
 // 49 个核算项(从 capture 探测得到的固定顺序)
 export const METRICS = [
