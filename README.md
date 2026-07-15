@@ -148,7 +148,10 @@ daima/
 │   └── huice/lib/
 │       ├── db.mjs                # SQLite 数据库
 │       ├── profit.mjs            # 商品利润计算
-│       └── shop-profit.mjs       # 店铺利润计算
+│       ├── shop-profit.mjs       # 店铺利润计算
+│       ├── export-flow.mjs      # 下载业务层解析器
+│       ├── pdd-promo-target.mjs  # 推广页目标锁定器
+│       └── collector-result.mjs  # 采集结果状态
 ├── test/                    # 单元测试
 └── private/                 # 凭证+数据库（gitignored）
 ```
@@ -166,6 +169,10 @@ daima/
 - 拼多多推广平台用自定义组件不是 element-ui
 - 读界面数字用页面文本按行提取不靠 DOM 选择器
 - "对比时间" checkbox 会干扰数据
+- 两个推广页同时打开会采错店铺，需按 mallId=338884784 锁定目标页
+- CDP 连接超时会泄漏 WebSocket，必须在 reject 前关掉
+- 商品快照要按日期原子替换，否则同日旧行删不掉
+- 日期面板要选最后一个可见面板，不能选第一个
 
 ---
 
