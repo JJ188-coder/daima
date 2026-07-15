@@ -18,11 +18,14 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { upsertPddPromoDaily, getPddShopMapping } from '../scripts/huice/lib/db.mjs';
 import { collectorExitCode, createCollectorResult, hasCompletePromoMetrics, markCollectorFailure } from '../scripts/huice/lib/collector-result.mjs';
+import { acquirePromoTarget, connectCdp, TARGET_PDD_MALL_ID } from '../scripts/huice/lib/pdd-promo-target.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
 const DB_PATH = resolve(ROOT, 'private/huice-data.sqlite');
 const PROMO_URL = 'https://yingxiao.pinduoduo.com/goods/report/promotion/overView';
+const PROMO_HOST = 'yingxiao.pinduoduo.com';
+const CDP_HTTP_ORIGIN = 'http://127.0.0.1:9222';
 
 const args = process.argv.slice(2);
 let days = 1;
@@ -183,11 +186,8 @@ async function readMallId(ws) {
   return mallId || '';
 }
 
-/** 通过 mallId 映射查 huice_shop_id,写入 pdd_promo_daily 独立表 */
-function updatePromoSpend(date, promoData, mallId) {
-  if (!mallId) return false;
-
-  const mapping = getPddShopMapping(mallId);
+/** 使用已验证映射写入 pdd_promo_daily 独立表 */
+function updatePromoSpend(date, promoData, mapping) {
   if (!mapping) return false;
 
   upsertPddPromoDaily({
@@ -215,56 +215,55 @@ async function main() {
   console.log(`🚀 拼多多推广费采集（${dateList.length} 天）`);
   console.log(`   日期范围: ${dateList[0]} ~ ${dateList[dateList.length - 1]}`);
 
-  // 找拼多多推广平台标签页
-  const tabs = await (await fetch('http://127.0.0.1:9222/json/list')).json();
-  let pddTab = tabs.find(t => t.type === 'page' && t.url.includes('yingxiao.pinduoduo.com'));
-
-  if (!pddTab) {
-    pddTab = tabs.find(t => t.type === 'page' && t.url.includes('pinduoduo.com'));
-    if (pddTab) {
-      const ws = new WebSocket(pddTab.webSocketDebuggerUrl);
-      await new Promise((r, rej) => { ws.addEventListener('open', r, { once: true }); ws.addEventListener('error', rej, { once: true }); setTimeout(rej, 5000); });
-      await cdpEval(ws, `location.href = "${PROMO_URL}"`);
-      ws.close();
-      await sleep(8000);
-      const tabs2 = await (await fetch('http://127.0.0.1:9222/json/list')).json();
-      pddTab = tabs2.find(t => t.type === 'page' && t.url.includes('yingxiao.pinduoduo.com'));
+  const tabs = await (await fetch(`${CDP_HTTP_ORIGIN}/json/list`)).json();
+  const promoTabs = tabs.filter(tab => {
+    if (tab.type !== 'page' || !tab.url || !tab.webSocketDebuggerUrl) return false;
+    try {
+      return new URL(tab.url).hostname === PROMO_HOST;
+    } catch {
+      return false;
     }
-  }
-
-  if (!pddTab) {
-    console.error('❌ 没找到拼多多推广平台标签页');
-    result.fatalError = new Error('PDD promotion tab not found');
+  });
+  if (promoTabs.length === 0) {
+    console.error(`❌ 没找到 ${PROMO_HOST} 推广平台标签页`);
+    result.fatalError = new Error(`target promotion mallId ${TARGET_PDD_MALL_ID} not found: no promotion pages found`);
     return result;
   }
 
-  const ws = new WebSocket(pddTab.webSocketDebuggerUrl);
-  await new Promise((r, rej) => { ws.addEventListener('open', r, { once: true }); ws.addEventListener('error', rej, { once: true }); setTimeout(rej, 5000); });
-  console.log(`✅ CDP 已连接`);
-
-  // 提取 mallId(用于映射到慧经营店铺)
-  const mallId = await readMallId(ws);
-  if (!mallId) {
-    console.error('❌ 无法从页面提取 mallId,退出');
-    ws.close();
-    result.fatalError = new Error('mallId not found');
+  const browserVersion = await (await fetch(`${CDP_HTTP_ORIGIN}/json/version`)).json();
+  let targetSession;
+  try {
+    targetSession = await acquirePromoTarget(
+      {
+        candidates: promoTabs.map(tab => ({
+          targetId: tab.id,
+          url: tab.url,
+          webSocketDebuggerUrl: tab.webSocketDebuggerUrl,
+        })),
+        browserWebSocketDebuggerUrl: browserVersion.webSocketDebuggerUrl,
+      },
+      {
+        connectCdp,
+        readMallId,
+        cdpCall,
+        getMapping: getPddShopMapping,
+      },
+    );
+  } catch (error) {
+    console.error(`❌ 无法安全确定目标推广页: ${error.message}`);
+    result.fatalError = error;
     return result;
   }
-  console.log(`✅ mallId=${mallId}`);
 
-  const mapping = getPddShopMapping(mallId);
-  if (!mapping) {
-    console.error(`❌ mallId=${mallId} 在 pdd_shop_mapping 中没有映射,退出`);
-    ws.close();
-    result.fatalError = new Error('shop mapping not found');
-    return result;
-  }
-  console.log(`✅ 映射到慧经营店铺: shopId=${mapping.huice_shop_id} name=${mapping.pdd_shop_name}`);
+  const ws = targetSession.keepWs;
+  console.log(`✅ CDP 已连接,目标 mallId=${targetSession.verifiedMallId}`);
+  console.log(`✅ 映射到慧经营店铺: shopId=${targetSession.mapping.huice_shop_id} name=${targetSession.mapping.pdd_shop_name}`);
 
   const failedDates = result.failedDates;
 
-  for (let i = 0; i < dateList.length; i++) {
-    const targetDate = dateList[i];
+  try {
+    for (let i = 0; i < dateList.length; i++) {
+      const targetDate = dateList[i];
     console.log(`\n📅 [${i + 1}/${dateList.length}] 采集 ${targetDate}...`);
 
     // 1. 切日期
@@ -311,16 +310,18 @@ async function main() {
     console.log(`  📊 推广费=¥${promo.promoSpend} 交易额=¥${promo.gmv} ROI=${promo.roi} 店铺=${promo.shopName}`);
 
     // 4. 入库
-    const updated = updatePromoSpend(targetDate, promo, mallId);
-    if (updated) {
-      console.log(`  ✅ 已更新 pdd_promo_daily`);
-    } else {
-      console.log(`  ⚠️ 未匹配到慧经营店铺,跳过`);
-      markCollectorFailure(result, targetDate, 'shop mapping unavailable');
+      const updated = updatePromoSpend(targetDate, promo, targetSession.mapping);
+      if (updated) {
+        console.log(`  ✅ 已更新 pdd_promo_daily`);
+      } else {
+        console.log(`  ⚠️ 未匹配到慧经营店铺,跳过`);
+        markCollectorFailure(result, targetDate, 'shop mapping unavailable');
+      }
     }
+  } finally {
+    targetSession.closeKeepWs();
   }
 
-  ws.close();
   console.log(`\n✅ 完成`);
   if (failedDates.length > 0) {
     console.log(`⚠️ ${failedDates.length} 天失败: ${failedDates.join(', ')}`);
