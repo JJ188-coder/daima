@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { normalizeProfitRecord } from './profit.mjs';
 
 const __dirname = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const DB_PATH = resolve(__dirname, 'private/huice-data.sqlite');
+const DB_PATH = process.env.HUICE_DB_PATH ?? resolve(__dirname, 'private/huice-data.sqlite');
 
 // 49 个核算项(从 capture 探测得到的固定顺序)
 export const METRICS = [
@@ -237,8 +237,7 @@ function ensureProductProfitSchema(db) {
 }
 
 /** 插入或更新店铺 */
-export function upsertShop(huiceName) {
-  const db = getDb();
+function upsertShopWithDb(db, huiceName) {
   // 解析平台和店名
   const m = huiceName.match(/^(.+?)[【】\(\)（（]/);
   let platform = '';
@@ -265,6 +264,10 @@ export function upsertShop(huiceName) {
   // 返回 shop 对象
   const row = db.prepare('SELECT shop_id, huice_name, shop_name FROM shops WHERE huice_name = ?').get(huiceName);
   return row;
+}
+
+export function upsertShop(huiceName) {
+  return upsertShopWithDb(getDb(), huiceName);
 }
 
 /** 批量插入每日利润(有则更新) */
@@ -308,10 +311,7 @@ export function getDailyProfitRange(shopId, startDate, endDate) {
   return rows.map(r => ({ ...r, metrics: JSON.parse(r.metrics_json) }));
 }
 
-/** 商品级:单条 upsert(来自 huice-sync.mjs 抓的 record) */
-export function upsertProductProfit(record) {
-  const db = getDb();
-  const normalized = normalizeProfitRecord(record);
+function upsertProductProfitWithDb(db, normalized) {
   // 尝试用 shopName 反查 shop_id(可选关联)
   let shopId = null;
   if (normalized.shopName) {
@@ -377,6 +377,11 @@ export function upsertProductProfit(record) {
   );
 }
 
+/** 商品级:单条 upsert(来自 huice-sync.mjs 抓的 record) */
+export function upsertProductProfit(record) {
+  return upsertProductProfitWithDb(getDb(), normalizeProfitRecord(record));
+}
+
 /** 商品级:批量 upsert(同日多商品),返回入库条数 */
 export function bulkUpsertProductProfit(records) {
   if (!records?.length) return 0;
@@ -385,12 +390,40 @@ export function bulkUpsertProductProfit(records) {
     let n = 0;
     for (const r of rows) {
       if (!r.productId || !r.date) continue;
-      upsertProductProfit(r);
+      upsertProductProfitWithDb(db, normalizeProfitRecord(r));
       n++;
     }
     return n;
   });
   return tx(records);
+}
+
+/** 商品级:原子替换单日完整快照,返回入库条数 */
+export function replaceProductProfitDateSnapshot(records) {
+  if (!Array.isArray(records) || records.length === 0) {
+    throw new TypeError('product profit snapshot must be a non-empty array');
+  }
+
+  const normalizedRows = records.map(record => normalizeProfitRecord(record));
+  for (const row of normalizedRows) {
+    if (!row.productId || !row.date) {
+      throw new TypeError('every product profit snapshot row requires productId and date');
+    }
+  }
+
+  const dates = new Set(normalizedRows.map(row => row.date));
+  if (dates.size !== 1) {
+    throw new TypeError('product profit snapshot must contain exactly one date');
+  }
+
+  const db = getDb();
+  const date = normalizedRows[0].date;
+  const tx = db.transaction((rows) => {
+    db.prepare('DELETE FROM product_profit WHERE date = ?').run(date);
+    for (const row of rows) upsertProductProfitWithDb(db, row);
+    return rows.length;
+  });
+  return tx(normalizedRows);
 }
 
 /** 商品级:查某日所有商品记录 */
@@ -432,8 +465,7 @@ export function findShopByName(huiceName) {
   return db.prepare('SELECT * FROM shops WHERE huice_name = ?').get(huiceName);
 }
 
-export function upsertShopDailyProfit(record) {
-  const db = getDb();
+function upsertShopDailyProfitWithDb(db, record) {
   db.prepare(`
     INSERT INTO shop_daily_profit (shop_id, date, sales_amount, promo_spend, platform_fee, labor_fee, net_profit, net_profit_rate, promo_fee_ratio, roi, metrics_json, raw_row_json)
     VALUES (@shopId, @date, @salesAmount, @promoSpend, @platformFee, @laborFee, @netProfit, @netProfitRate, @promoFeeRatio, @roi, @metricsJson, @rawRowJson)
@@ -463,6 +495,26 @@ export function upsertShopDailyProfit(record) {
     metricsJson: JSON.stringify(record.metrics || {}),
     rawRowJson: JSON.stringify(record.rawRow || {}),
   });
+}
+
+export function upsertShopDailyProfit(record) {
+  return upsertShopDailyProfitWithDb(getDb(), record);
+}
+
+/** 店铺级:原子解析/更新店铺并批量 upsert 日利润,返回入库条数 */
+export function bulkUpsertShopDailyProfit(records) {
+  if (!records?.length) return 0;
+  const db = getDb();
+  const tx = db.transaction((rows) => {
+    let count = 0;
+    for (const record of rows) {
+      const shop = upsertShopWithDb(db, record.shopName);
+      upsertShopDailyProfitWithDb(db, { ...record, shopId: shop.shop_id });
+      count++;
+    }
+    return count;
+  });
+  return tx(records);
 }
 
 export function getShopDailyProfitRange(shopId, startDate, endDate) {

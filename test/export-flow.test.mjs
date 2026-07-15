@@ -6,6 +6,7 @@ import {
   classifyPopup,
   decideExportPoll,
   decideExportSubmitState,
+  downloadCenterBusinessResolverSource,
   elementUiActiveDialogPredicateSource,
   normalizeButtonText,
   normalizeExportTask,
@@ -22,6 +23,62 @@ function task(overrides = {}) {
     buttonVisible: overrides.buttonVisible ?? true,
     ...overrides,
   };
+}
+
+function resolverElement({ className = '', visible = true, parent = null, gridApi = null, textContent = '' } = {}) {
+  const attributes = new Map();
+  return {
+    className,
+    parentElement: parent,
+    offsetParent: visible ? {} : null,
+    textContent,
+    __vue__: gridApi ? { gridApi } : undefined,
+    getBoundingClientRect: () => ({ width: visible ? 900 : 0, height: visible ? 500 : 0 }),
+    closest(selector) {
+      let current = this;
+      while (current) {
+        if (selector === '.analyzerContainer.view') {
+          const classes = String(current.className || '').split(/\s+/);
+          if (classes.includes('analyzerContainer') && classes.includes('view')) return current;
+        }
+        current = current.parentElement;
+      }
+      return null;
+    },
+    setAttribute(name, value) { attributes.set(name, String(value)); },
+    getAttribute(name) { return attributes.get(name) ?? null; },
+    querySelector(selector) {
+      if (selector === '.v-ag-grid') return this.grid || null;
+      return null;
+    },
+  };
+}
+
+function downloadCenterGridApi(rows = [{ id: 'task-1', taskName: '商品排名导出', updateTime: '2026-07-11 10:21:31', statusName: '待下载', download: true }]) {
+  return {
+    forEachNode(callback) { rows.forEach((data, rowIndex) => callback({ data, rowIndex })); },
+    getColumnDef(columnId) { return columnId === 'operation' ? { field: 'operation' } : undefined; },
+  };
+}
+
+function runDownloadCenterResolver({ roots, grids, notifications = [] }) {
+  const document = {
+    querySelectorAll(selector) {
+      if (selector === '.v-ag-grid') return grids;
+      if (selector === '.el-notification, .el-message') return notifications;
+      return [];
+    },
+  };
+  const location = { hash: '#/baseSettings/downloadCenter' };
+  return new Function('document', 'location', `return (${downloadCenterBusinessResolverSource});`)(document, location);
+}
+
+function validResolverLayer({ visible = true, rows } = {}) {
+  const root = resolverElement({ className: 'analyzerContainer view', visible });
+  const gridApi = rows === undefined ? downloadCenterGridApi() : downloadCenterGridApi(rows);
+  const grid = resolverElement({ className: 'v-ag-grid', visible, parent: root, gridApi });
+  root.grid = grid;
+  return { root, grid };
 }
 
 test('selects the newest eligible task instead of the first DOM row', () => {
@@ -110,6 +167,82 @@ test('poll policy waits, refreshes, clicks, and times out deterministically', ()
   assert.deepEqual(decideExportPoll({ attempt: 3, maxAttempts: 10, refreshEvery: 3, taskDecision: { decision: 'wait', reason: 'task_pending' } }), { action: 'reload', reason: 'task_pending', candidates: [] });
   assert.deepEqual(decideExportPoll({ attempt: 2, maxAttempts: 10, refreshEvery: 3, taskDecision: { decision: 'click', selected: { key: 'new' } } }), { action: 'click', taskKey: 'new', candidates: [] });
   assert.deepEqual(decideExportPoll({ attempt: 9, maxAttempts: 10, refreshEvery: 3, taskDecision: { decision: 'wait', reason: 'no_new_task' } }), { action: 'fail', reason: 'task_timeout', candidates: [] });
+});
+
+test('download-center resolver accepts and tags a valid visible empty grid', () => {
+  const current = validResolverLayer({ rows: [] });
+  const result = runDownloadCenterResolver({ roots: [current.root], grids: [current.grid] });
+
+  assert.equal(result.ok, true);
+  assert.ok(result.layerId);
+  assert.equal(current.root.getAttribute('data-huice-download-layer-id'), result.layerId);
+  assert.equal(current.grid.getAttribute('data-huice-download-layer-id'), result.layerId);
+  assert.equal(result.diagnostics.totalRows, 0);
+  assert.equal(result.diagnostics.validTaskRows, 0);
+});
+
+test('download-center resolver returns ambiguity for two valid visible empty grids', () => {
+  const first = validResolverLayer({ rows: [] });
+  const second = validResolverLayer({ rows: [] });
+  const result = runDownloadCenterResolver({ roots: [first.root, second.root], grids: [first.grid, second.grid] });
+
+  assert.deepEqual({ ok: result.ok, reason: result.reason }, { ok: false, reason: 'ambiguous' });
+  assert.equal(result.diagnostics.candidateCount, 2);
+  assert.deepEqual(result.diagnostics.candidates, [
+    { totalRows: 0, validTaskRows: 0 },
+    { totalRows: 0, validTaskRows: 0 },
+  ]);
+  assert.equal(first.root.getAttribute('data-huice-download-layer-id'), null);
+  assert.equal(first.grid.getAttribute('data-huice-download-layer-id'), null);
+  assert.equal(second.root.getAttribute('data-huice-download-layer-id'), null);
+  assert.equal(second.grid.getAttribute('data-huice-download-layer-id'), null);
+});
+
+test('download-center resolver ignores a hidden old layer and selects the current visible layer', () => {
+  const hidden = validResolverLayer({ visible: false });
+  const current = validResolverLayer();
+  const result = runDownloadCenterResolver({
+    roots: [hidden.root, current.root],
+    grids: [hidden.grid, current.grid],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(hidden.root.getAttribute('data-huice-download-layer-id'), null);
+  assert.equal(current.root.getAttribute('data-huice-download-layer-id'), result.layerId);
+});
+
+test('download-center resolver returns ambiguity instead of choosing the first valid layer', () => {
+  const first = validResolverLayer();
+  const second = validResolverLayer();
+  const result = runDownloadCenterResolver({ roots: [first.root, second.root], grids: [first.grid, second.grid] });
+
+  assert.deepEqual({ ok: result.ok, reason: result.reason }, { ok: false, reason: 'ambiguous' });
+  assert.equal(first.root.getAttribute('data-huice-download-layer-id'), null);
+  assert.equal(second.root.getAttribute('data-huice-download-layer-id'), null);
+});
+
+test('download-center resolver writes the same generated layerId to the root and grid', () => {
+  const current = validResolverLayer();
+  const result = runDownloadCenterResolver({ roots: [current.root], grids: [current.grid] });
+
+  assert.equal(result.ok, true);
+  assert.ok(result.layerId);
+  assert.equal(current.root.getAttribute('data-huice-download-layer-id'), result.layerId);
+  assert.equal(current.grid.getAttribute('data-huice-download-layer-id'), result.layerId);
+});
+
+test('a visible higher notification layer is diagnostic only and does not affect selection', () => {
+  const current = validResolverLayer();
+  const notification = resolverElement({ className: 'el-notification', visible: true, textContent: '导出成功' });
+  const result = runDownloadCenterResolver({
+    roots: [current.root],
+    grids: [current.grid],
+    notifications: [notification],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(current.root.getAttribute('data-huice-download-layer-id'), result.layerId);
+  assert.equal(result.diagnostics.notificationCount, 1);
 });
 
 test('Element UI dialog predicate excludes wrappers in leave transition', () => {

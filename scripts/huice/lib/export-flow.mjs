@@ -15,6 +15,86 @@ export const elementUiActiveDialogPredicateSource = `(dialog => {
   return !wrapper || !String(wrapper.className || '').includes('leave');
 })`;
 
+export const downloadCenterBusinessResolverSource = `(() => {
+  const isVisible = element => {
+    if (!element || element.offsetParent === null) return false;
+    const rect = element.getBoundingClientRect?.();
+    return Boolean(rect && rect.width > 0 && rect.height > 0);
+  };
+  const notifications = [...document.querySelectorAll('.el-notification, .el-message')].filter(isVisible);
+  const diagnostics = {
+    route: String(location.hash || ''),
+    visibleGridCount: 0,
+    candidateCount: 0,
+    notificationCount: notifications.length,
+    rejected: [],
+  };
+  const candidates = [];
+  for (const grid of document.querySelectorAll('.v-ag-grid')) {
+    if (!isVisible(grid)) continue;
+    diagnostics.visibleGridCount++;
+    const root = grid.closest?.('.analyzerContainer.view');
+    if (!isVisible(root)) {
+      diagnostics.rejected.push('root-not-visible');
+      continue;
+    }
+    const gridApi = grid.__vue__?.gridApi;
+    if (!gridApi || typeof gridApi.forEachNode !== 'function') {
+      diagnostics.rejected.push('grid-api-unavailable');
+      continue;
+    }
+    let totalRows = 0;
+    let validTaskRows = 0;
+    gridApi.forEachNode(node => {
+      totalRows++;
+      const data = node?.data;
+      if (!data || data.id == null) return;
+      if (!('taskName' in data) || !('updateTime' in data) || !('statusName' in data) || !('download' in data)) return;
+      validTaskRows++;
+    });
+    if (totalRows > 0 && validTaskRows === 0) {
+      diagnostics.rejected.push({ reason: 'task-structure-unavailable', totalRows, validTaskRows });
+      continue;
+    }
+    const operationColumn = gridApi.getColumnDef?.('operation')
+      || gridApi.columnApi?.getColumn?.('operation')
+      || gridApi.getColumn?.('operation');
+    if (!operationColumn) {
+      diagnostics.rejected.push('operation-column-unavailable');
+      continue;
+    }
+    const downloadCenterChain = String(location.hash || '') === '#/baseSettings/downloadCenter'
+      && root === grid.closest?.('.analyzerContainer.view');
+    if (!downloadCenterChain) {
+      diagnostics.rejected.push('wrong-download-center-chain');
+      continue;
+    }
+    candidates.push({ root, grid, totalRows, validTaskRows });
+  }
+  diagnostics.candidateCount = candidates.length;
+  if (candidates.length === 0) return { ok: false, reason: 'not-found', diagnostics };
+  if (candidates.length > 1) return {
+    ok: false,
+    reason: 'ambiguous',
+    diagnostics: {
+      ...diagnostics,
+      candidates: candidates.map(({ totalRows, validTaskRows }) => ({ totalRows, validTaskRows })),
+    },
+  };
+  const layerId = 'huice-download-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  candidates[0].root.setAttribute('data-huice-download-layer-id', layerId);
+  candidates[0].grid.setAttribute('data-huice-download-layer-id', layerId);
+  return {
+    ok: true,
+    layerId,
+    diagnostics: {
+      ...diagnostics,
+      totalRows: candidates[0].totalRows,
+      validTaskRows: candidates[0].validTaskRows,
+    },
+  };
+})()`;
+
 export function decideExportSubmitState(state = {}) {
   if (state.wrapperLeaving || !state.dialogOpen || state.notices?.length || state.taskEvidence) return 'accepted';
   return 'retry';
